@@ -1,6 +1,6 @@
 {
   "name": "dsh-encrypt",
-  "version": "0.1.0-rc.12",
+  "version": "0.2.0",
   "description": "WebUI-managed encrypted credentials for DeepSeek Harness: one file, plaintext until a password is set, then AES-256-GCM ciphertext under an Argon2id-derived key with SHA3-256 fingerprints; per-request decryption, unlock lockout, leak-guard output redaction, and shipped-code integrity self-checks.",
   "keywords": [
     "aes-256-gcm",
@@ -37,14 +37,13 @@
     },
     "./client": {
       "types": "./lib/client.d.ts",
-      "import": "./lib/client.js",
-      "default": "./lib/client.js"
+      "import": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsdown && tsdown -c tsdown.client.config.ts",
+    "build": "tsdown",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm knip",
     "dev": "tsdown --watch",
     "format": "oxfmt --write .",
@@ -59,11 +58,11 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.build.json --noEmit && tsc -p tsconfig.tools.json --noEmit"
   },
   "dependencies": {
-    "@deepseek-ai/cordis": "4.0.1",
-    "@deepseek-ai/dsh-atomic-write": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-credentials": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-home-paths": "0.1.0-rc.6",
-    "@deepseek-ai/dsh-launch-environment": "0.1.0-rc.6",
+    "@deepseek-ai/cordis": "4.0.5-alpha.2",
+    "@deepseek-ai/dsh-atomic-write": "0.2.1-alpha.5",
+    "@deepseek-ai/dsh-credentials": "0.2.1-alpha.5",
+    "@deepseek-ai/dsh-home-paths": "0.2.1-alpha.5",
+    "@deepseek-ai/dsh-launch-environment": "0.2.1-alpha.5",
     "@deepseek-ai/schemastery": "^3.18.1",
     "@node-rs/argon2": "^2.1.0",
     "chokidar": "^5.0.0",
@@ -86,7 +85,7 @@
     "vitest": "4.1.10"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.1"
+    "@deepseek-ai/cordis": "^4.0.5-alpha.2"
   },
   "packageManager": "pnpm@11.22.0+sha512.1ff870c4c6133dfd88fb2afc46dd13d47f09c9794b438c6fdb47ca98caf3bc16381ee0be93a091b8e3824cf01f889f46d7d9e20910fb0be1ab0fb5baa80dd621",
   "dsh": {

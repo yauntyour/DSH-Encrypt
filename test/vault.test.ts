@@ -1,13 +1,16 @@
+import type { SealedRecordValue } from '../lib/vault.js'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { describe, it } from 'vitest'
 import {
+  RECORD_VAULT_VERSION,
   VAULT_ALGORITHM,
   VAULT_VERSION,
   VaultError,
   argon2Defaults,
   createPasswordKeyFile,
   decryptEntry,
+  decryptRecordPayload,
   deriveArgon2idKey,
   deriveMasterKey,
   deriveScryptKey,
@@ -15,6 +18,7 @@ import {
   encodeMasterKey,
   encryptCredentialStore,
   encryptEntry,
+  encryptRecordPayload,
   generateMasterKey,
   generatePasswordSalt,
   isPasswordKeyFile,
@@ -31,6 +35,14 @@ import {
 
 const key = generateMasterKey()
 const KEY_B64 = encodeMasterKey(key)
+
+/** The v4 store fields the tampering test edits; parsed JSON is untrusted but typed for the assertions. */
+interface TamperableStore {
+  version: number
+  sha3: string
+  records: Record<'demo/account', { data: string }>
+  [field: string]: unknown
+}
 
 describe('master key encoding', () => {
   it('round-trips through base64url', () => {
@@ -368,5 +380,98 @@ describe('single-file encrypted credential store', () => {
         ),
       { code: 'VAULT_INVALID' },
     )
+  })
+})
+
+describe('credential record payloads and versioned stores', () => {
+  const PASSWORD = 'records password six'
+  const DIGEST = sha3_256Hex(PASSWORD)
+  const RECORD_KEY = 'demo/account'
+  const RECORD_JSON = JSON.stringify({ kind: 'api-key', key: 'sk-record-1' })
+
+  const sealOne = (
+    key: Buffer,
+    seal: 'password' | 'machine',
+    kind: 'api-key' | 'grant',
+  ): Map<string, SealedRecordValue> =>
+    new Map<string, SealedRecordValue>([
+      [RECORD_KEY, { form: 'sealed', kind, seal, entry: encryptRecordPayload(key, RECORD_KEY, RECORD_JSON) }],
+    ])
+
+  it('round-trips a record payload bound to its key as GCM AAD', () => {
+    const masterKey = generateMasterKey()
+    const sealed = encryptRecordPayload(masterKey, RECORD_KEY, RECORD_JSON)
+    assert.equal(decryptRecordPayload(masterKey, RECORD_KEY, sealed), RECORD_JSON)
+    assert.ok(!sealed.data.includes('sk-record-1'))
+    assert.throws(() => decryptRecordPayload(masterKey, 'demo/other', sealed), { code: 'VAULT_KEY_MISMATCH' })
+    assert.throws(() => encryptRecordPayload(masterKey, 'DEMO_ACCOUNT', RECORD_JSON), { code: 'VAULT_INVALID' })
+    assert.throws(() => encryptRecordPayload(masterKey, RECORD_KEY, ''), { code: 'VAULT_INVALID' })
+    zeroizeBuffer(masterKey)
+  })
+  it('writes version 4 only when records exist, and unlock returns them', async () => {
+    const bare = await encryptCredentialStore(new Map([['KEY', 'value']]), DIGEST)
+    assert.equal(JSON.parse(bare.text).version, VAULT_VERSION, 'a record-less store stays readable by older builds')
+    const withRecords = await encryptCredentialStore(new Map([['KEY', 'value']]), DIGEST, argon2Defaults(), key =>
+      sealOne(key, 'password', 'api-key'),
+    )
+    const doc = JSON.parse(withRecords.text) as {
+      version: number
+      records: Record<'demo/account', { seal: string; kind: string }>
+    }
+    assert.equal(doc.version, RECORD_VAULT_VERSION)
+    assert.deepEqual(Object.keys(doc.records), [RECORD_KEY])
+    assert.equal(doc.records[RECORD_KEY].seal, 'password')
+    assert.equal(doc.records[RECORD_KEY].kind, 'api-key')
+    const unlocked = await unlockEncryptedStore(withRecords.text, DIGEST)
+    const slot = unlocked.records.get(RECORD_KEY)
+    assert.ok(slot !== undefined && slot.form === 'sealed')
+    assert.equal(decryptRecordPayload(unlocked.key, RECORD_KEY, slot.entry), RECORD_JSON)
+    zeroizeBuffer(bare.key)
+    zeroizeBuffer(withRecords.key)
+    zeroizeBuffer(unlocked.key)
+  })
+  it('covers records with the document fingerprint and the record-level check', async () => {
+    const created = await encryptCredentialStore(new Map([['KEY', 'value']]), DIGEST, argon2Defaults(), key =>
+      sealOne(key, 'machine', 'grant'),
+    )
+    const flipped = (data: string) => `${data.slice(0, -1)}${data.endsWith('A') ? 'B' : 'A'}`
+    const doc = JSON.parse(created.text) as TamperableStore
+    doc.records[RECORD_KEY].data = flipped(doc.records[RECORD_KEY].data)
+    assert.throws(() => parseEncryptedStore(`${JSON.stringify(doc, null, 2)}\n`), { code: 'VAULT_CORRUPTED' })
+    // An attacker who recomputes the document fingerprint falls through to the
+    // record-level SHA3-256 check, which names the record.
+    const forged = JSON.parse(created.text) as TamperableStore
+    forged.records[RECORD_KEY].data = flipped(forged.records[RECORD_KEY].data)
+    const fingerprintFields = [
+      'format',
+      'version',
+      'algorithm',
+      'kdf',
+      'kdfInput',
+      'n',
+      'r',
+      'm',
+      't',
+      'p',
+      'salt',
+      'verifier',
+      'remember',
+      'entries',
+      'records',
+    ]
+    const fingerprintTarget = Object.fromEntries(
+      fingerprintFields.filter(field => forged[field] !== undefined).map(field => [field, forged[field]]),
+    )
+    forged.sha3 = createHash('sha3-256').update(JSON.stringify(fingerprintTarget), 'utf8').digest('hex')
+    assert.throws(
+      () => parseEncryptedStore(`${JSON.stringify(forged, null, 2)}\n`),
+      error => {
+        assert.ok(error instanceof VaultError)
+        assert.equal(error.code, 'VAULT_CORRUPTED')
+        assert.match(error.message, /demo\/account/)
+        return true
+      },
+    )
+    zeroizeBuffer(created.key)
   })
 })

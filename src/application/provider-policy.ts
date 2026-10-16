@@ -1,6 +1,26 @@
-import type { RememberBlock } from '../domain/vault/model.js'
+import type { RecordSeal, RememberBlock } from '../domain/vault/model.js'
 import { REMEMBER_BLOCK_VERSION, REMEMBER_DAY_MS } from '../domain/vault/model.js'
 import { rememberActive } from './remember-service.js'
+
+/**
+ * The record the local browser-session secret lives in. Boot-time consumers
+ * read or write this record before any vault password can be supplied, so it
+ * is always `machine`-sealed and never password-sealed — otherwise a locked
+ * vault would break the Web UI's own login.
+ */
+const LOCKED_BOOT_RECORD_KEY = 'client-connection/browser-session' as const
+
+/**
+ * Choose the seal for a record entering encrypted storage. Existing records
+ * keep their seal; this decides new ones. While the vault is locked no
+ * password key exists, so the record is machine-sealed and stays usable.
+ * @param key - the record's credential key.
+ * @param passwordAvailable - whether a password key seals this write.
+ * @returns the seal to assign.
+ */
+export function sealForRecord(key: string, passwordAvailable: boolean): RecordSeal {
+  return key === LOCKED_BOOT_RECORD_KEY || !passwordAvailable ? 'machine' : 'password'
+}
 
 export interface LockoutSnapshot {
   failures: number

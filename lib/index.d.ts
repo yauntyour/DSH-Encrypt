@@ -1,7 +1,7 @@
-import { B as EntryRecord, H as KdfName, U as KdfParams, Z as RememberBlock, ct as VaultError, o as unlockEncryptedStore } from "./vault-BwiX-hzp.js";
+import { J as EntryRecord, X as KdfName, Z as KdfParams, ct as RecordValue, d as parsePlainDocument, f as renderPlainDocument, ht as SealedRecordValue, lt as RememberBlock, o as unlockEncryptedStore, st as RecordSeal, xt as VaultError } from "./vault-Dd09Msle.js";
 import { t as LeakGuard } from "./leak-guard-BYcHOd2D.js";
 import { Context } from "@deepseek-ai/cordis";
-import { CredentialInfo, CredentialProvider, CredentialRef, ResolvedCredential } from "@deepseek-ai/dsh-credentials";
+import { CredentialInfo, CredentialKey, CredentialProvider, CredentialRecord, CredentialRecordEntry, CredentialRecordInfo, CredentialRef, ResolvedCredential } from "@deepseek-ai/dsh-credentials";
 import { LaunchEnvironmentEntry } from "@deepseek-ai/dsh-launch-environment";
 import z from "@deepseek-ai/schemastery";
 //#region src/domain/provider/model.d.ts
@@ -65,12 +65,6 @@ interface ProviderStatus {
 declare const CREDENTIALS_FILENAME: ".credentials.yaml";
 declare const DEFAULT_PASSWORD_ENV: "DSH_CREDENTIAL_PASSWORD";
 //#endregion
-//#region src/infrastructure/persistence/plain-credential-document.d.ts
-/** Parse a plaintext credential YAML mapping. */
-declare function parsePlainEntries(text: string, filename: string): Map<string, string>;
-/** Render one plaintext credential edit while preserving YAML comments. */
-declare function renderPlainDocument(text: string | undefined, ref: string, value: string | undefined): string;
-//#endregion
 //#region src/infrastructure/persistence/secure-file.d.ts
 /** Reject unsafe file types, ownership and POSIX permissions without following links. */
 declare function assertOwnerOnly(filename: string): Promise<void>;
@@ -87,15 +81,22 @@ declare function resolveSpec(config?: ProviderConfig): ProviderSpec;
  * forms:
  *
  * ```text
- * no password set (default, drop-in identical to dsh-credentials-local):
- *   OPENCODE_GO_API_KEY: sk-…                    ← plaintext YAML mapping
+ * no password set (default; the versioned layout shared with credentials-local):
+ *   version: 1                                   ← plaintext YAML document
+ *   refs:
+ *     OPENCODE_GO_API_KEY: sk-…                  ← references
+ *   records:
+ *     client-connection/browser-session: …       ← credential records
  *
  * after a password is set in Settings → 加密安全:
  *   { "format": "dsh-encrypt-credentials",      ← the same file's contents
- *     "kdf": "scrypt", "salt": …, "verifier": …, replaced by an encrypted
- *     "entries": { REF: { data, sha3 } }, … }     JSON document (SHA3-256
- *                                                  fingerprints + GCM tags)
+ *     "version": 4, "kdf": "argon2id", …,        replaced by an encrypted
+ *     "entries": { REF: { data, sha3 } },        JSON document (SHA3-256
+ *     "records": { KEY: { kind, seal, … } } }     fingerprints + GCM tags)
  * ```
+ *
+ * The pre-port flat plaintext layout (references at the root) is still read
+ * and migrates to the versioned one on the first write.
  *
  * State machine:
  *
@@ -110,6 +111,12 @@ declare function resolveSpec(config?: ProviderConfig): ProviderSpec;
  * `resolve` throws `VAULT_LOCKED` and `describe` reports `source: "locked"` —
  * the Settings page is the unlock surface. Credentials are decrypted per
  * model request; plaintext is never cached between operations.
+ *
+ * Records arrive in two seals: `password`-sealed records are ciphertext
+ * under the vault key, unreadable while locked exactly like entries, while
+ * `machine`-sealed records (the local browser-session secret) are sealed
+ * under an installation key kept in the runtime state file, so boot-time
+ * consumers keep working while the vault is locked.
  *
  * Password APIs: `status()` / `unlock(digest)` / `setPassword(digest)` /
  * `changePassword(oldDigest, digest)`, also exposed to the browser
@@ -136,6 +143,12 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
   /** KDF salt and cost parameters of the current encrypted document. */
   salt: Buffer | undefined;
   params: KdfParams | undefined;
+  /**
+   * The current document's key verifier, kept so a locked rewrite (a
+   * machine-sealed record, a deletion) can reproduce the document without
+   * the password key.
+   */
+  verifier: EntryRecord | undefined;
   /** KDF of the current encrypted document: "argon2id" or legacy "scrypt". */
   kdf: KdfName;
   /**
@@ -144,6 +157,17 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
    * lockable key.
    */
   entries: Map<string, string | EntryRecord>;
+  /**
+   * Record snapshot: plaintext records in the plain form, sealed records in
+   * the encrypted form. Never mixes the two.
+   */
+  records: Map<string, RecordValue>;
+  /**
+   * The installation records key, sealing and opening `machine`-sealed
+   * records (kept in the state file, so it survives a locked restart). Not
+   * password-derived and not part of the lock state.
+   */
+  recordsKey: Buffer | undefined;
   /**
    * Raw text of the last read or persisted document; `undefined` while the
    * file is absent. Watcher events whose content equals this cache are
@@ -201,6 +225,64 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
   private initializeService;
   /** Zeroize and release the derived key (lock). */
   dropKey(): void;
+  /** Zeroize and release the installation records key (dispose only; a lock keeps it). */
+  dropRecordsKey(): void;
+  /** The installation records key, generated and kept in memory on first need. */
+  requireRecordsKey(): Buffer;
+  /**
+   * The installation records key for opening a machine-sealed record. A
+   * machine slot whose key is gone is unrecoverable, so refuse loudly rather
+   * than guessing with a fresh key.
+   */
+  machineRecordsKey(): Buffer;
+  /**
+   * Assert the encrypted snapshot is complete enough to rewrite the document
+   * — locked or not. Locked rewrites reuse the document's verifier, so the
+   * password key is not required.
+   */
+  assertDocumentWritable(verb: string): asserts this is this & {
+    format: "encrypted";
+    salt: Buffer;
+    params: KdfParams;
+    text: string;
+  };
+  /** Serialize the current encrypted snapshot, reusing the document's verifier. */
+  serializeSnapshot(entries: ReadonlyMap<string, string | EntryRecord>, records: ReadonlyMap<string, RecordValue>, remember: RememberBlock | undefined): string;
+  /**
+   * Adopt sealed records from a parsed document. A `machine`-sealed record
+   * without the installation key is unreadable lost ciphertext: the key
+   * would have to be forged, so the entries are dropped with an error and
+   * rebuilt by the consumer that owns them.
+   */
+  adoptSealedRecords(records: ReadonlyMap<string, SealedRecordValue>): void;
+  /** Open one sealed record payload into a validated record. */
+  openRecord(key: string, entry: unknown, keyBuffer: Buffer): CredentialRecord;
+  /**
+   * Seal one record payload under its chosen seal. A password seal needs the
+   * unlocked vault key; a machine seal needs only the installation key, so it
+   * works while the vault is locked.
+   */
+  sealRecord(key: string, record: CredentialRecord, seal: RecordSeal, passwordKey: Buffer | undefined): SealedRecordValue;
+  /**
+   * Seal the current record snapshot for a new password key: plaintext
+   * records take their policy seal, password-sealed records re-encrypt under
+   * the new key, and machine-sealed records carry over untouched.
+   */
+  sealRecordsFor(passwordKey: Buffer): Map<string, SealedRecordValue>;
+  /**
+   * Seal a plaintext record snapshot for the encrypted form during an
+   * external-edit re-encryption. A machine seal needs the installation key;
+   * it is generated and persisted before the ciphertext that depends on it.
+   */
+  sealRecordsFromPlain(records: ReadonlyMap<string, CredentialRecord>, passwordKey: Buffer): Promise<Map<string, SealedRecordValue>>;
+  /**
+   * Generate and persist the installation records key before a transition
+   * that will machine-seal records, so the ciphertext never precedes the key
+   * that opens it.
+   */
+  persistRecordsKeyIfNeeded(): Promise<void>;
+  /** Report top-level keys the versioned plaintext layout does not define. */
+  logIgnoredPlainKeys(ignoredKeys: readonly string[]): void;
   /**
    * Boot read: an absent file is an empty plain store. A present encrypted
    * store must pass its SHA3-256 integrity checks before activation; it then
@@ -288,6 +370,55 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
   /** Shared queue+lock+reconcile wrapper for password transitions. */
   passwordTransition<T>(operation: () => Promise<T>): Promise<T>;
   describe(ref: CredentialRef): Promise<CredentialInfo>;
+  /** True while password-sealed records can be decrypted right now. */
+  recordsReadable(): boolean;
+  /**
+   * Read one record. Password-sealed records read as `undefined` while the
+   * vault is locked — boot-time consumers must keep working — and the same
+   * holds while a plaintext file is refused; machine-sealed records always
+   * read.
+   * @param key - the record to read.
+   * @returns the record, or `undefined` while absent or unreadable.
+   */
+  readRecord(key: CredentialKey): Promise<CredentialRecord | undefined>;
+  /**
+   * Describe one record without reading it.
+   * @param key - the record to describe.
+   * @returns configuration, the record kind (clear metadata), and whether a
+   *   modification would currently succeed.
+   */
+  describeRecord(key: CredentialKey): Promise<CredentialRecordInfo>;
+  /**
+   * List every stored record's address and kind — never its value.
+   * @returns the records, sorted by key.
+   */
+  listRecords(): Promise<readonly CredentialRecordEntry[]>;
+  /**
+   * Read-modify-write one record under the store's file lock. While locked a
+   * password-sealed record refuses with `VAULT_LOCKED`, while a record that
+   * does not exist yet is created machine-sealed — boot-time consumers such
+   * as the local browser session keep working on a locked vault.
+   * @param key - the record to modify.
+   * @param mutate - receives the current record and returns its replacement,
+   *   or `undefined` to leave it untouched.
+   * @returns the record after the write, or the current one when the
+   *   mutation declined.
+   */
+  modifyRecord(key: CredentialKey, mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>): Promise<CredentialRecord | undefined>;
+  /**
+   * Remove one record under the store's file lock; removing an absent record
+   * is a no-op. Works while locked — dropping ciphertext needs no key.
+   * @param key - the record to remove.
+   */
+  deleteRecord(key: CredentialKey): Promise<void>;
+  /**
+   * Fan the reference event out under the current name and, contained, under
+   * the legacy `credentials/updated` name older dsh lines still listen to.
+   * @param ref - the reference whose stored value changed.
+   */
+  protected override notifyUpdated(ref: CredentialRef): void;
+  /** Report one failed legacy `credentials/updated` listener without changing the committed outcome. */
+  private warnLegacyListenerFailure;
   set(ref: CredentialRef, value: string): Promise<void>;
   unset(ref: CredentialRef): Promise<void>;
   /** Queue one exclusive document operation behind every earlier one. */
@@ -328,9 +459,9 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
   /** Load the runtime state file ({ rememberDays }) if present and valid. */
   loadStateFile(): Promise<void>;
   /**
-   * Write the runtime state file: the remembered-login window plus the
-   * ciphertext-only policy flag. Never throws — state persistence must not
-   * break credential operations.
+   * Write the runtime state file: the remembered-login window, the
+   * ciphertext-only policy flag, and the installation records key. Never
+   * throws — state persistence must not break credential operations.
    */
   persistState(): Promise<void>;
   /**
@@ -368,5 +499,5 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
   revokeRememberIfDisabled(): Promise<void>;
 }
 //#endregion
-export { CREDENTIALS_FILENAME, DEFAULT_PASSWORD_ENV, EncryptedCredentialProvider, EncryptedCredentialProvider as default, type ProviderConfig, type ProviderSpec, type ProviderStatus, type RememberIssue, VaultError, assertOwnerOnly, parsePlainEntries, renderPlainDocument, resolveSpec };
+export { CREDENTIALS_FILENAME, DEFAULT_PASSWORD_ENV, EncryptedCredentialProvider, EncryptedCredentialProvider as default, type ProviderConfig, type ProviderSpec, type ProviderStatus, type RememberIssue, VaultError, assertOwnerOnly, parsePlainDocument, renderPlainDocument, resolveSpec };
 //# sourceMappingURL=index.d.ts.map

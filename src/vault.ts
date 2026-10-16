@@ -19,6 +19,7 @@ export {
   MASTER_KEY_BYTES,
   NONCE_BYTES,
   PASSWORD_SALT_BYTES,
+  RECORD_VAULT_VERSION,
   REMEMBER_DAY_MS,
   REMEMBER_KEY_REF,
   SCRYPT_MAXMEM,
@@ -36,8 +37,12 @@ export {
   type KdfName,
   type KdfParams,
   type ParsedEncryptedStore,
+  type PlainRecordValue,
+  type RecordSeal,
+  type RecordValue,
   type RememberBlock,
   type ScryptParams,
+  type SealedRecordValue,
 } from './domain/vault/model.js'
 
 export {
@@ -45,11 +50,14 @@ export {
   createPasswordKeyFile,
   decryptEntry,
   decryptEntryBuffer,
+  decryptRecordPayload,
+  decryptRecordPayloadBuffer,
   deriveArgon2idKey,
   deriveMasterKey,
   deriveScryptKey,
   encodeMasterKey,
   encryptEntry,
+  encryptRecordPayload,
   generateMasterKey,
   generatePasswordSalt,
   isDigest,
@@ -69,6 +77,14 @@ export {
   serializeEncryptedStore,
   verifyDocument,
 } from './infrastructure/persistence/vault-document.js'
+
+export {
+  PLAIN_DOCUMENT_VERSION,
+  parsePlainDocument,
+  renderPlainDocument,
+  type PlainCredentialDocument,
+  type PlainDocumentEdit,
+} from './infrastructure/persistence/plain-credential-document.js'
 
 export {
   encryptCredentialStore,

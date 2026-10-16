@@ -1,7 +1,8 @@
-import type { Argon2Params, EntryRecord, ParsedEncryptedStore } from '../domain/vault/model.js'
+import type { Argon2Params, EntryRecord, ParsedEncryptedStore, SealedRecordValue } from '../domain/vault/model.js'
 import { KEY_FILE_VERIFIER_REF, VAULT_KDF, VaultError } from '../domain/vault/model.js'
 import {
   argon2Defaults,
+  createKeyVerifier,
   decryptEntry,
   deriveArgon2idKey,
   deriveMasterKey,
@@ -17,6 +18,8 @@ export interface EncryptedStoreCreation {
   text: string
   key: Buffer
   entries: Map<string, EntryRecord>
+  records: Map<string, SealedRecordValue>
+  verifier: EntryRecord
   salt: Buffer
   params: Argon2Params
 }
@@ -25,11 +28,13 @@ export interface EncryptedStoreCreation {
 export async function unlockEncryptedStore(
   text: string,
   digest: string,
-): Promise<Omit<ParsedEncryptedStore, 'verifier' | 'documentSha3'> & { key: Buffer }> {
+): Promise<Omit<ParsedEncryptedStore, 'documentSha3'> & { key: Buffer }> {
   const { key, parsed } = await deriveVerifiedKey(text, digest)
   return {
     key,
     entries: parsed.entries,
+    records: parsed.records,
+    verifier: parsed.verifier,
     salt: parsed.salt,
     params: parsed.params,
     kdf: parsed.kdf,
@@ -43,11 +48,21 @@ export async function verifyPasswordDigest(text: string, digest: string): Promis
   zeroizeBuffer(key)
 }
 
-/** Encrypt a complete plaintext credential map under a new password digest. */
+/**
+ * Encrypt a complete plaintext credential map under a new password digest.
+ * @param plaintexts - references and their values, encrypted as entries.
+ * @param digest - SHA3-256 hex digest of the vault password.
+ * @param params - Argon2id parameters for the new store.
+ * @param sealRecords - seals the record snapshot under the derived key, so
+ *   records enter the encrypted document together with the entries; omit for
+ *   a store without records.
+ * @returns the serialized store and its in-memory counterpart.
+ */
 export async function encryptCredentialStore(
   plaintexts: Map<string, string>,
   digest: string,
   params: Argon2Params = argon2Defaults(),
+  sealRecords?: (key: Buffer) => Map<string, SealedRecordValue>,
 ): Promise<EncryptedStoreCreation> {
   assertPasswordDigest(digest)
   const salt = generatePasswordSalt()
@@ -62,10 +77,14 @@ export async function encryptCredentialStore(
     }
     entries.set(ref, encryptEntry(key, ref, value))
   }
+  const records = sealRecords === void 0 ? new Map<string, SealedRecordValue>() : sealRecords(key)
+  const verifier = createKeyVerifier(key)
   return {
-    text: serializeEncryptedStore(entries, key, salt, params, void 0, VAULT_KDF),
+    text: serializeEncryptedStore(entries, key, salt, params, void 0, VAULT_KDF, records, verifier),
     key,
     entries,
+    records,
+    verifier,
     salt,
     params,
   }

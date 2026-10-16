@@ -45,7 +45,6 @@ import type {
  * @module dsh-encrypt/web
  */
 import z from '@deepseek-ai/schemastery'
-import { assertRuntimeCompat } from './compat.js'
 import { loadAndVerifyIntegrity } from './integrity.js'
 import {
   armSocketRedaction as armSocketRedactionImpl,
@@ -120,9 +119,6 @@ export interface WebConfig {
 // Re-check shipped-file consistency for web-only compositions. The adjacent
 // manifest detects incomplete builds; it is not a signature or trust root.
 loadAndVerifyIntegrity(import.meta.url)
-// Runtime compatibility guard (see ./compat.js): a dsh release outside the
-// supported line refuses to load with a clear UNSUPPORTED_DSH error.
-assertRuntimeCompat()
 
 export const name = 'dsh-encrypt-web'
 export const inject = ['webServer', 'credentials'] as const

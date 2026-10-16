@@ -58,7 +58,7 @@ export function createRememberBlock(
 export function recoverKeyFromRemember(
   text: string,
   secretText: string,
-): Omit<ParsedEncryptedStore, 'verifier' | 'documentSha3'> & { key: Buffer; remember: RememberBlock } {
+): Omit<ParsedEncryptedStore, 'documentSha3'> & { key: Buffer; remember: RememberBlock } {
   const parsed = parseEncryptedStore(text)
   if (parsed.remember === void 0) {
     throw new VaultError('REMEMBER_INVALID', 'this credential store has no remembered login')
@@ -90,6 +90,8 @@ export function recoverKeyFromRemember(
   return {
     key,
     entries: parsed.entries,
+    records: parsed.records,
+    verifier: parsed.verifier,
     salt: parsed.salt,
     params: parsed.params,
     kdf: parsed.kdf,

@@ -6,14 +6,17 @@
 # `ctx.credentials` seam, so every consumer — the LLM adapters, the web Models
 # page, web-search — keeps working unchanged.
 #
-# One file, two forms: $DSH_HOME/.credentials.yaml stays plaintext YAML until
-# a password is set in Settings → 加密安全, then the same file's contents are
-# replaced by an AES-256-GCM encrypted document (SHA3-256 fingerprints) whose
-# master key is stretched from the password digest with Argon2id.
+# One file, two forms: $DSH_HOME/.credentials.yaml is plaintext YAML (the
+# versioned refs/records layout shared with credentials-local) until a password
+# is set in Settings → 加密安全, then the same file's contents are replaced by
+# an AES-256-GCM encrypted document (SHA3-256 fingerprints) whose master key is
+# stretched from the password digest with Argon2id. Structured credential
+# records are sealed per policy: machine-sealed ones stay readable while
+# locked (boot-time consumers), password-sealed ones do not.
 # Web compositions additionally mount the `dsh-encrypt/web` row for the
 # browser password routes and the output redaction install.
 #
-# Security hardening (all on by default; see README → 安全加固):
+# Security hardening (all on by default; see README → 安全模型):
 #   - leakGuard:        mask resolved credential values in WebUI responses /
 #                       WebSocket frames (prompt-injection echo defense)
 #   - maxUnlockAttempts / lockoutBaseMs / lockoutMaxMs:

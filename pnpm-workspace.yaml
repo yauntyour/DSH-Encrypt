@@ -1,0 +1,6 @@
+minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-atomic-write@0.2.1-alpha.5'
+  - '@deepseek-ai/dsh-brand@0.2.1-alpha.5'
+  - '@deepseek-ai/dsh-credentials@0.2.1-alpha.5'
+  - '@deepseek-ai/dsh-home-paths@0.2.1-alpha.5'
+  - '@deepseek-ai/dsh-launch-environment@0.2.1-alpha.5'

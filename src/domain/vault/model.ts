@@ -1,7 +1,15 @@
+import type { CredentialRecord } from '@deepseek-ai/dsh-credentials'
+
 /** Stable domain constants and types for encrypted credential documents. */
 
 /** Document schema version. v3 stretches the password digest with Argon2id. */
 export const VAULT_VERSION = 3 as const
+/**
+ * Encrypted-document version that adds the sealed `records` section (the
+ * credential seam's second key space). v3 documents have no records and still
+ * parse; a store writes v4 the first time it holds one.
+ */
+export const RECORD_VAULT_VERSION = 4 as const
 /** Algorithm identifier persisted in the document and asserted on parse. */
 export const VAULT_ALGORITHM = 'aes-256-gcm+sha3-256' as const
 /** KDF marker written by v3 documents. */
@@ -45,6 +53,32 @@ export interface EntryRecord {
   sha3: string
 }
 
+/**
+ * Which key seals one stored record. `password` records are AES-256-GCM
+ * ciphertext under the Argon2id password key: unreadable while the vault is
+ * locked. `machine` records are ciphertext under the installation's records
+ * key (kept in the runtime state file): always readable, so boot-time
+ * consumers such as the local browser-session secret survive a locked boot.
+ */
+export type RecordSeal = 'password' | 'machine'
+
+/** One plaintext record as stored in a plain document. */
+export interface PlainRecordValue {
+  form: 'plain'
+  record: CredentialRecord
+}
+
+/** One sealed record as stored in an encrypted document. */
+export interface SealedRecordValue {
+  form: 'sealed'
+  kind: CredentialRecord['kind']
+  seal: RecordSeal
+  entry: EntryRecord
+}
+
+/** One record slot in the in-memory snapshot; the form follows the document form. */
+export type RecordValue = PlainRecordValue | SealedRecordValue
+
 export interface Argon2Params {
   m: number
   t: number
@@ -75,6 +109,7 @@ export interface ParsedEncryptedStore {
   kdf: KdfName
   verifier: EntryRecord
   entries: Map<string, EntryRecord>
+  records: Map<string, SealedRecordValue>
   remember?: RememberBlock | undefined
   documentSha3: string
 }

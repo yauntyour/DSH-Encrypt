@@ -5,24 +5,47 @@ import type {
   ProviderStatus,
   RememberIssue,
 } from './domain/provider/model.js'
-import type { EntryRecord, KdfName, KdfParams, RememberBlock } from './vault.js'
+import type {
+  EntryRecord,
+  KdfName,
+  KdfParams,
+  PlainRecordValue,
+  RecordSeal,
+  RecordValue,
+  RememberBlock,
+  SealedRecordValue,
+} from './vault.js'
 import type { Context } from '@deepseek-ai/cordis'
-import type { CredentialInfo, CredentialRef, ResolvedCredential } from '@deepseek-ai/dsh-credentials'
+import type {
+  CredentialInfo,
+  CredentialKey,
+  CredentialRecord,
+  CredentialRecordEntry,
+  CredentialRecordInfo,
+  CredentialRef,
+  ResolvedCredential,
+} from '@deepseek-ai/dsh-credentials'
 import type { LaunchEnvironmentEntry } from '@deepseek-ai/dsh-launch-environment'
 import { mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { Service } from '@deepseek-ai/cordis'
 import { withFileLock, writeFileAtomic } from '@deepseek-ai/dsh-atomic-write'
-import { CredentialProvider, credentialRef } from '@deepseek-ai/dsh-credentials'
+import { CredentialProvider, credentialRef, parseCredentialKey } from '@deepseek-ai/dsh-credentials'
 import { canonicalizeWatchPath } from '@deepseek-ai/dsh-home-paths'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import z from '@deepseek-ai/schemastery'
 import { watch } from 'chokidar'
 import { OperationQueue } from './application/operation-queue.js'
-import { effectiveRememberDays, lockoutSnapshot, rememberSnapshot } from './application/provider-policy.js'
-import { assertRuntimeCompat } from './compat.js'
+import {
+  effectiveRememberDays,
+  lockoutSnapshot,
+  rememberSnapshot,
+  sealForRecord,
+} from './application/provider-policy.js'
+import { detectDshRuntime } from './compat.js'
 import { CREDENTIALS_FILENAME, DEFAULT_PASSWORD_ENV } from './domain/provider/model.js'
-import { parsePlainEntries, renderPlainDocument } from './infrastructure/persistence/plain-credential-document.js'
+import { credentialRecordIssue } from './domain/vault/records.js'
+import { parsePlainDocument, renderPlainDocument } from './infrastructure/persistence/plain-credential-document.js'
 import {
   parseProviderRuntimeState,
   serializeProviderRuntimeState,
@@ -37,14 +60,20 @@ import {
   REMEMBER_DAY_MS,
   VAULT_KDF,
   LEGACY_KDF,
+  argon2Defaults,
   createRememberBlock,
   decryptEntry,
   decryptEntryBuffer,
+  decryptRecordPayload,
   detectCredentialStore,
+  encodeMasterKey,
   encryptCredentialStore,
   encryptEntry,
+  encryptRecordPayload,
+  generateMasterKey,
   isDigest,
   parseEncryptedStore,
+  parseMasterKey,
   recoverKeyFromRemember,
   serializeEncryptedStore,
   sha3_256Hex,
@@ -56,10 +85,6 @@ import {
 // Shipped-file consistency check: an incomplete or locally edited build is
 // refused. The adjacent manifest is not a signature or trust root.
 loadAndVerifyIntegrity(import.meta.url)
-// Runtime compatibility check: a dsh release outside the supported line
-// refuses to load with a clear UNSUPPORTED_DSH error instead of failing
-// somewhere inside the seams (see ./compat.js for the policy).
-assertRuntimeCompat()
 //#region lib/types/index.js
 /**
  * dsh-encrypt — single-file, WebUI-managed encrypted credentials.
@@ -68,15 +93,22 @@ assertRuntimeCompat()
  * forms:
  *
  * ```text
- * no password set (default, drop-in identical to dsh-credentials-local):
- *   OPENCODE_GO_API_KEY: sk-…                    ← plaintext YAML mapping
+ * no password set (default; the versioned layout shared with credentials-local):
+ *   version: 1                                   ← plaintext YAML document
+ *   refs:
+ *     OPENCODE_GO_API_KEY: sk-…                  ← references
+ *   records:
+ *     client-connection/browser-session: …       ← credential records
  *
  * after a password is set in Settings → 加密安全:
  *   { "format": "dsh-encrypt-credentials",      ← the same file's contents
- *     "kdf": "scrypt", "salt": …, "verifier": …, replaced by an encrypted
- *     "entries": { REF: { data, sha3 } }, … }     JSON document (SHA3-256
- *                                                  fingerprints + GCM tags)
+ *     "version": 4, "kdf": "argon2id", …,        replaced by an encrypted
+ *     "entries": { REF: { data, sha3 } },        JSON document (SHA3-256
+ *     "records": { KEY: { kind, seal, … } } }     fingerprints + GCM tags)
  * ```
+ *
+ * The pre-port flat plaintext layout (references at the root) is still read
+ * and migrates to the versioned one on the first write.
  *
  * State machine:
  *
@@ -92,6 +124,12 @@ assertRuntimeCompat()
  * the Settings page is the unlock surface. Credentials are decrypted per
  * model request; plaintext is never cached between operations.
  *
+ * Records arrive in two seals: `password`-sealed records are ciphertext
+ * under the vault key, unreadable while locked exactly like entries, while
+ * `machine`-sealed records (the local browser-session secret) are sealed
+ * under an installation key kept in the runtime state file, so boot-time
+ * consumers keep working while the vault is locked.
+ *
  * Password APIs: `status()` / `unlock(digest)` / `setPassword(digest)` /
  * `changePassword(oldDigest, digest)`, also exposed to the browser
  * as `/api/credentials.{status,unlock,set-password,change-password,config}`
@@ -104,6 +142,41 @@ type UnlockResult = Awaited<ReturnType<typeof unlockEncryptedStore>>
 /** Whether one credential changed between two snapshots (for the updated event). */
 function refChanged(prev: ReadonlyMap<string, unknown>, next: ReadonlyMap<string, unknown>, ref: string): boolean {
   return prev.get(ref) !== next.get(ref)
+}
+/** A comparable signature of one record slot (for the updated event). */
+function recordSignature(slot: RecordValue | undefined): string {
+  if (slot === void 0) return ''
+  return slot.form === 'plain'
+    ? `plain:${JSON.stringify(slot.record)}`
+    : `sealed:${slot.seal}:${slot.kind}:${slot.entry.data}`
+}
+/** Narrow the record snapshot to sealed entries for an encrypted-document write. */
+function sealedRecordMap(records: ReadonlyMap<string, RecordValue>): Map<string, SealedRecordValue> {
+  const sealed = new Map<string, SealedRecordValue>()
+  for (const [key, slot] of records) {
+    if (slot.form !== 'sealed') {
+      throw new VaultError('VAULT_INVALID', `record "${key}" is plaintext while the store form is encrypted`)
+    }
+    sealed.set(key, slot)
+  }
+  return sealed
+}
+/** Build the plain-form record snapshot from parsed records. */
+function plainRecordMap(records: ReadonlyMap<string, CredentialRecord>): Map<string, PlainRecordValue> {
+  const slots = new Map<string, PlainRecordValue>()
+  for (const [key, record] of records) slots.set(key, { form: 'plain', record })
+  return slots
+}
+/** Narrow the entry snapshot to ciphertext records for an encrypted-document write. */
+function encryptedEntryMap(entries: ReadonlyMap<string, string | EntryRecord>): Map<string, EntryRecord> {
+  const narrowed = new Map<string, EntryRecord>()
+  for (const [ref, value] of entries) {
+    if (typeof value === 'string') {
+      throw new VaultError('VAULT_INVALID', `entry "${ref}" is plaintext while the store form is encrypted`)
+    }
+    narrowed.set(ref, value)
+  }
+  return narrowed
 }
 /**
  * Single-file encrypted credentials provider with a WebUI-managed password.
@@ -152,6 +225,12 @@ class EncryptedCredentialProvider extends CredentialProvider {
   /** KDF salt and cost parameters of the current encrypted document. */
   salt: Buffer | undefined
   params: KdfParams | undefined
+  /**
+   * The current document's key verifier, kept so a locked rewrite (a
+   * machine-sealed record, a deletion) can reproduce the document without
+   * the password key.
+   */
+  verifier: EntryRecord | undefined
   /** KDF of the current encrypted document: "argon2id" or legacy "scrypt". */
   kdf: KdfName = VAULT_KDF
   /**
@@ -160,6 +239,17 @@ class EncryptedCredentialProvider extends CredentialProvider {
    * lockable key.
    */
   entries: Map<string, string | EntryRecord> = /* @__PURE__ */ new Map()
+  /**
+   * Record snapshot: plaintext records in the plain form, sealed records in
+   * the encrypted form. Never mixes the two.
+   */
+  records: Map<string, RecordValue> = /* @__PURE__ */ new Map()
+  /**
+   * The installation records key, sealing and opening `machine`-sealed
+   * records (kept in the state file, so it survives a locked restart). Not
+   * password-derived and not part of the lock state.
+   */
+  recordsKey: Buffer | undefined
   /**
    * Raw text of the last read or persisted document; `undefined` while the
    * file is absent. Watcher events whose content equals this cache are
@@ -193,10 +283,11 @@ class EncryptedCredentialProvider extends CredentialProvider {
   }
   constructor(ctx: Context, config: ProviderConfig = {}) {
     super(ctx)
-    // Surface a same-line rc drift of the dsh runtime as a warning (the
-    // module-level guard already refused hard mismatches).
-    const compat = assertRuntimeCompat()
-    if (compat.verdict?.level === 'warn') ctx.logger.warn(`dsh-encrypt: ${compat.verdict.reason}`)
+    // Version identification only: the plugin is built for flowing
+    // compatibility and no longer refuses a dsh line, but the running
+    // release is logged so a misbehaving combination is diagnosable.
+    const runtime = detectDshRuntime()
+    if (runtime !== null) ctx.logger.info('dsh-encrypt: running on dsh %s', runtime.version)
     this.config = normalizeProviderConfig(config)
     this.spec = resolveSpec(this.config)
     this.leakGuard = new LeakGuard({
@@ -284,7 +375,9 @@ class EncryptedCredentialProvider extends CredentialProvider {
       this.closed = true
       await this.operations
       this.dropKey()
+      this.dropRecordsKey()
       this.entries.clear()
+      this.records.clear()
       this.text = void 0
     }
     try {
@@ -316,9 +409,11 @@ class EncryptedCredentialProvider extends CredentialProvider {
         await watcher.close()
         await this.operations
         this.dropKey()
+        this.dropRecordsKey()
       }
     } catch (error) {
       this.dropKey()
+      this.dropRecordsKey()
       throw error
     }
   }
@@ -330,6 +425,201 @@ class EncryptedCredentialProvider extends CredentialProvider {
     }
     this.unlocked = this.format === 'plain'
     this.leakGuard.clear()
+  }
+  /** Zeroize and release the installation records key (dispose only; a lock keeps it). */
+  dropRecordsKey(): void {
+    if (this.recordsKey !== void 0) {
+      zeroizeBuffer(this.recordsKey)
+      this.recordsKey = void 0
+    }
+  }
+  /** The installation records key, generated and kept in memory on first need. */
+  requireRecordsKey(): Buffer {
+    this.recordsKey ??= generateMasterKey()
+    return this.recordsKey
+  }
+  /**
+   * The installation records key for opening a machine-sealed record. A
+   * machine slot whose key is gone is unrecoverable, so refuse loudly rather
+   * than guessing with a fresh key.
+   */
+  machineRecordsKey(): Buffer {
+    if (this.recordsKey === void 0) {
+      throw new VaultError('VAULT_INVALID', 'the installation records key is missing from the state file')
+    }
+    return this.recordsKey
+  }
+  /**
+   * Assert the encrypted snapshot is complete enough to rewrite the document
+   * — locked or not. Locked rewrites reuse the document's verifier, so the
+   * password key is not required.
+   */
+  assertDocumentWritable(verb: string): asserts this is this & {
+    format: 'encrypted'
+    salt: Buffer
+    params: KdfParams
+    text: string
+  } {
+    if (this.format !== 'encrypted' || this.salt === void 0 || this.params === void 0 || this.text === void 0) {
+      throw new VaultError('VAULT_INVALID', `cannot ${verb}: the encrypted credential store is incomplete`)
+    }
+  }
+  /** Serialize the current encrypted snapshot, reusing the document's verifier. */
+  serializeSnapshot(
+    entries: ReadonlyMap<string, string | EntryRecord>,
+    records: ReadonlyMap<string, RecordValue>,
+    remember: RememberBlock | undefined,
+  ): string {
+    this.assertDocumentWritable('rewrite the credential store')
+    return serializeEncryptedStore(
+      encryptedEntryMap(entries),
+      this.key,
+      this.salt,
+      this.params,
+      remember,
+      this.kdf,
+      sealedRecordMap(records),
+      this.verifier,
+    )
+  }
+  /**
+   * Adopt sealed records from a parsed document. A `machine`-sealed record
+   * without the installation key is unreadable lost ciphertext: the key
+   * would have to be forged, so the entries are dropped with an error and
+   * rebuilt by the consumer that owns them.
+   */
+  adoptSealedRecords(records: ReadonlyMap<string, SealedRecordValue>): void {
+    const needsMachine = [...records.values()].some(slot => slot.seal === 'machine')
+    if (!needsMachine || this.recordsKey !== void 0) {
+      this.records = new Map(records)
+      return
+    }
+    const kept = new Map<string, SealedRecordValue>()
+    let dropped = 0
+    for (const [key, slot] of records) {
+      if (slot.seal === 'machine') {
+        dropped += 1
+        continue
+      }
+      kept.set(key, slot)
+    }
+    this.records = kept
+    this.ctx.logger.error(
+      'dsh-encrypt: %d machine-sealed record(s) are unreadable because the state file no longer carries the records key; they were dropped and will be rebuilt on the next write',
+      dropped,
+    )
+  }
+  /** Open one sealed record payload into a validated record. */
+  openRecord(key: string, entry: unknown, keyBuffer: Buffer): CredentialRecord {
+    const text = decryptRecordPayload(keyBuffer, key, entry)
+    let value: unknown
+    try {
+      value = JSON.parse(text)
+    } catch {
+      throw new VaultError('VAULT_CORRUPTED', `record "${key}" does not hold valid JSON`)
+    }
+    const issue = credentialRecordIssue(value)
+    if (issue !== undefined) {
+      throw new VaultError('VAULT_CORRUPTED', `record "${key}" ${issue}`)
+    }
+    return value as CredentialRecord
+  }
+  /**
+   * Seal one record payload under its chosen seal. A password seal needs the
+   * unlocked vault key; a machine seal needs only the installation key, so it
+   * works while the vault is locked.
+   */
+  sealRecord(
+    key: string,
+    record: CredentialRecord,
+    seal: RecordSeal,
+    passwordKey: Buffer | undefined,
+  ): SealedRecordValue {
+    if (seal === 'machine') {
+      return {
+        form: 'sealed',
+        kind: record.kind,
+        seal,
+        entry: encryptRecordPayload(this.requireRecordsKey(), key, JSON.stringify(record)),
+      }
+    }
+    if (passwordKey === void 0) {
+      throw new VaultError(
+        'VAULT_LOCKED',
+        `the credential record "${key}" cannot be password-sealed without the vault password`,
+      )
+    }
+    return {
+      form: 'sealed',
+      kind: record.kind,
+      seal,
+      entry: encryptRecordPayload(passwordKey, key, JSON.stringify(record)),
+    }
+  }
+  /**
+   * Seal the current record snapshot for a new password key: plaintext
+   * records take their policy seal, password-sealed records re-encrypt under
+   * the new key, and machine-sealed records carry over untouched.
+   */
+  sealRecordsFor(passwordKey: Buffer): Map<string, SealedRecordValue> {
+    const sealed = new Map<string, SealedRecordValue>()
+    for (const [key, slot] of this.records) {
+      if (slot.form === 'sealed') {
+        if (slot.seal === 'machine') {
+          sealed.set(key, slot)
+          continue
+        }
+        this.assertUnlocked('re-seal a credential record')
+        const record = this.openRecord(key, slot.entry, this.key)
+        sealed.set(key, this.sealRecord(key, record, 'password', passwordKey))
+        continue
+      }
+      sealed.set(key, this.sealRecord(key, slot.record, sealForRecord(key, true), passwordKey))
+    }
+    return sealed
+  }
+  /**
+   * Seal a plaintext record snapshot for the encrypted form during an
+   * external-edit re-encryption. A machine seal needs the installation key;
+   * it is generated and persisted before the ciphertext that depends on it.
+   */
+  async sealRecordsFromPlain(
+    records: ReadonlyMap<string, CredentialRecord>,
+    passwordKey: Buffer,
+  ): Promise<Map<string, SealedRecordValue>> {
+    let needsMachineKey = false
+    for (const key of records.keys()) {
+      if (sealForRecord(key, true) === 'machine') needsMachineKey = true
+    }
+    if (needsMachineKey && this.recordsKey === void 0) {
+      this.requireRecordsKey()
+      await this.persistState()
+    }
+    const sealed = new Map<string, SealedRecordValue>()
+    for (const [key, record] of records) {
+      sealed.set(key, this.sealRecord(key, record, sealForRecord(key, true), passwordKey))
+    }
+    return sealed
+  }
+  /**
+   * Generate and persist the installation records key before a transition
+   * that will machine-seal records, so the ciphertext never precedes the key
+   * that opens it.
+   */
+  async persistRecordsKeyIfNeeded(): Promise<void> {
+    let needed = false
+    for (const [key, slot] of this.records) {
+      if (slot.form === 'plain' ? sealForRecord(key, true) === 'machine' : slot.seal === 'machine') needed = true
+    }
+    if (needed && this.recordsKey === void 0) {
+      this.requireRecordsKey()
+      await this.persistState()
+    }
+  }
+  /** Report top-level keys the versioned plaintext layout does not define. */
+  logIgnoredPlainKeys(ignoredKeys: readonly string[]): void {
+    if (ignoredKeys.length === 0) return
+    this.ctx.logger.warn('dsh-encrypt: ignoring unknown keys in %s: %s', this.spec.filename, ignoredKeys.join(', '))
   }
   /**
    * Boot read: an absent file is an empty plain store. A present encrypted
@@ -346,6 +636,7 @@ class EncryptedCredentialProvider extends CredentialProvider {
       this.format = 'plain'
       this.unlocked = true
       this.entries = /* @__PURE__ */ new Map()
+      this.records = /* @__PURE__ */ new Map()
       this.refusePlain = this.stateEncrypted === true
       if (this.refusePlain) {
         this.ctx.logger.error(
@@ -361,6 +652,8 @@ class EncryptedCredentialProvider extends CredentialProvider {
       this.params = parsed.params
       this.kdf = parsed.kdf
       this.entries = parsed.entries
+      this.adoptSealedRecords(parsed.records)
+      this.verifier = parsed.verifier
       this.remember = parsed.remember
       this.text = text
       this.unlocked = false
@@ -385,7 +678,11 @@ class EncryptedCredentialProvider extends CredentialProvider {
     }
     this.format = 'plain'
     this.unlocked = true
-    this.entries = parsePlainEntries(text, this.spec.filename)
+    const parsed = parsePlainDocument(text, this.spec.filename)
+    this.logIgnoredPlainKeys(parsed.ignoredKeys)
+    this.entries = parsed.refs
+    this.records = plainRecordMap(parsed.records)
+    this.verifier = void 0
     this.text = text
     this.syncGuard()
     if (this.stateEncrypted === true) {
@@ -400,6 +697,8 @@ class EncryptedCredentialProvider extends CredentialProvider {
   applyUnlock(unlocked: UnlockResult): void {
     this.key = unlocked.key
     this.entries = unlocked.entries
+    this.adoptSealedRecords(unlocked.records)
+    this.verifier = unlocked.verifier
     this.salt = unlocked.salt
     this.params = unlocked.params
     this.kdf = unlocked.kdf ?? VAULT_KDF
@@ -408,6 +707,12 @@ class EncryptedCredentialProvider extends CredentialProvider {
     // A fresh unlock starts with an empty mask set: values enter the leak
     // guard only as resolve() actually hands them out.
     this.leakGuard.clear()
+    // Password-sealed records just became readable: tell record consumers
+    // (account platform, model providers) to refresh what they saw while
+    // locked. Machine-sealed records were readable all along.
+    for (const [key, slot] of this.records) {
+      if (slot.form === 'sealed' && slot.seal === 'password') this.notifyRecordUpdated(parseCredentialKey(key))
+    }
   }
   /**
    * Resolve one reference per operation: plaintext value, or a decrypted
@@ -595,7 +900,7 @@ class EncryptedCredentialProvider extends CredentialProvider {
     this.assertUnlocked('upgrade the KDF')
     const plaintexts = new Map<string, string>()
     for (const [ref, record] of this.entries) plaintexts.set(ref, decryptEntry(this.key, ref, record))
-    const created = await encryptCredentialStore(plaintexts, digest)
+    const created = await encryptCredentialStore(plaintexts, digest, argon2Defaults(), key => this.sealRecordsFor(key))
     plaintexts.clear()
     await withFileLock(this.spec.filename, async () => {
       await this.reconcileFromDisk()
@@ -604,6 +909,8 @@ class EncryptedCredentialProvider extends CredentialProvider {
       await writeFileAtomic(this.spec.filename, created.text, { mode: 384, dirMode: 448 })
       this.text = created.text
       this.entries = created.entries
+      this.records = created.records
+      this.verifier = created.verifier
       this.salt = created.salt
       this.params = created.params
       this.remember = void 0
@@ -632,12 +939,19 @@ class EncryptedCredentialProvider extends CredentialProvider {
       throw new VaultError('VAULT_ALREADY_ENCRYPTED', 'the credential store already has a password; use changePassword')
     return this.passwordTransition(async () => {
       const plaintexts = this.entries as Map<string, string>
-      const created = await encryptCredentialStore(plaintexts, digest)
+      // A machine seal needs the installation key on disk before the
+      // ciphertext that depends on it.
+      await this.persistRecordsKeyIfNeeded()
+      const created = await encryptCredentialStore(plaintexts, digest, argon2Defaults(), key =>
+        this.sealRecordsFor(key),
+      )
       await writeFileAtomic(this.spec.filename, created.text, { mode: 384, dirMode: 448 })
       this.text = created.text
       this.format = 'encrypted'
       this.unlocked = true
       this.entries = created.entries
+      this.records = created.records
+      this.verifier = created.verifier
       this.salt = created.salt
       this.params = created.params
       this.kdf = VAULT_KDF
@@ -691,11 +1005,15 @@ class EncryptedCredentialProvider extends CredentialProvider {
       }
       const plaintexts = new Map<string, string>()
       for (const [ref, record] of this.entries) plaintexts.set(ref, decryptEntry(this.key, ref, record))
-      const created = await encryptCredentialStore(plaintexts, digest)
+      const created = await encryptCredentialStore(plaintexts, digest, argon2Defaults(), key =>
+        this.sealRecordsFor(key),
+      )
       plaintexts.clear()
       await writeFileAtomic(this.spec.filename, created.text, { mode: 384, dirMode: 448 })
       this.text = created.text
       this.entries = created.entries
+      this.records = created.records
+      this.verifier = created.verifier
       this.salt = created.salt
       this.params = created.params
       this.dropKey()
@@ -785,6 +1103,213 @@ class EncryptedCredentialProvider extends CredentialProvider {
       writable: true,
     })
   }
+  // ── credential records: the seam's second key space ─────────────────────
+
+  /** True while password-sealed records can be decrypted right now. */
+  recordsReadable(): boolean {
+    return this.format === 'plain' || (this.unlocked && this.key !== void 0)
+  }
+  /**
+   * Read one record. Password-sealed records read as `undefined` while the
+   * vault is locked — boot-time consumers must keep working — and the same
+   * holds while a plaintext file is refused; machine-sealed records always
+   * read.
+   * @param key - the record to read.
+   * @returns the record, or `undefined` while absent or unreadable.
+   */
+  async readRecord(key: CredentialKey): Promise<CredentialRecord | undefined> {
+    if (this.refusePlain) return void 0
+    const slot = this.records.get(key)
+    if (slot === void 0) return void 0
+    if (slot.form === 'plain') return slot.record
+    if (slot.seal === 'machine') return this.openRecord(key, slot.entry, this.machineRecordsKey())
+    if (!this.recordsReadable()) return void 0
+    this.assertUnlocked('read a credential record')
+    return this.openRecord(key, slot.entry, this.key)
+  }
+  /**
+   * Describe one record without reading it.
+   * @param key - the record to describe.
+   * @returns configuration, the record kind (clear metadata), and whether a
+   *   modification would currently succeed.
+   */
+  async describeRecord(key: CredentialKey): Promise<CredentialRecordInfo> {
+    if (this.refusePlain) return { configured: false, writable: false }
+    const slot = this.records.get(key)
+    if (slot === void 0) return { configured: false, writable: true }
+    if (slot.form === 'plain') return { configured: true, kind: slot.record.kind, writable: true }
+    return { configured: true, kind: slot.kind, writable: slot.seal === 'machine' || this.recordsReadable() }
+  }
+  /**
+   * List every stored record's address and kind — never its value.
+   * @returns the records, sorted by key.
+   */
+  async listRecords(): Promise<readonly CredentialRecordEntry[]> {
+    if (this.refusePlain) return []
+    const listed: CredentialRecordEntry[] = []
+    for (const key of [...this.records.keys()].sort()) {
+      const slot = this.records.get(key)
+      if (slot === void 0) continue
+      listed.push({ key: parseCredentialKey(key), kind: slot.form === 'plain' ? slot.record.kind : slot.kind })
+    }
+    return listed
+  }
+  /**
+   * Read-modify-write one record under the store's file lock. While locked a
+   * password-sealed record refuses with `VAULT_LOCKED`, while a record that
+   * does not exist yet is created machine-sealed — boot-time consumers such
+   * as the local browser session keep working on a locked vault.
+   * @param key - the record to modify.
+   * @param mutate - receives the current record and returns its replacement,
+   *   or `undefined` to leave it untouched.
+   * @returns the record after the write, or the current one when the
+   *   mutation declined.
+   */
+  async modifyRecord(
+    key: CredentialKey,
+    mutate: (current: CredentialRecord | undefined) => Promise<CredentialRecord | undefined>,
+  ): Promise<CredentialRecord | undefined> {
+    if (this.refusePlain) {
+      throw new VaultError(
+        'VAULT_INVALID',
+        'credential records are unavailable while the credential file is plaintext; set the password again in Settings → 加密安全 to re-encrypt it',
+      )
+    }
+    if (this.isClosed()) throw new Error(`dsh-encrypt is disposed: cannot modify record "${key}"`)
+    return this.enqueue(async () => {
+      if (this.isClosed()) throw new Error(`dsh-encrypt was disposed before the queued "${key}" record write ran`)
+      await mkdir(dirname(this.spec.filename), { recursive: true, mode: 448 })
+      return withFileLock(this.spec.filename, async () => {
+        await this.reconcileFromDisk()
+        if (this.refusePlain) {
+          throw new VaultError(
+            'VAULT_INVALID',
+            'credential records are unavailable because ciphertext is required; set the password again to create a new encrypted store',
+          )
+        }
+        const slot = this.records.get(key)
+        let current: CredentialRecord | undefined
+        if (slot !== void 0) {
+          if (slot.form === 'plain') {
+            current = slot.record
+          } else if (slot.seal === 'machine') {
+            current = this.openRecord(key, slot.entry, this.machineRecordsKey())
+          } else if (this.recordsReadable()) {
+            this.assertUnlocked('modify a credential record')
+            current = this.openRecord(key, slot.entry, this.key)
+          } else {
+            throw new VaultError(
+              'VAULT_LOCKED',
+              `the credential record "${key}" is sealed under the vault password; unlock it in Settings → 加密安全 to modify it`,
+            )
+          }
+        }
+        const next = await mutate(current)
+        if (next === undefined) return current
+        const issue = credentialRecordIssue(next)
+        if (issue !== undefined) throw new TypeError(`dsh-encrypt: the record mutation for "${key}" ${issue}`)
+        if (this.format === 'encrypted') {
+          const seal = slot === void 0 || slot.form === 'plain' ? sealForRecord(key, this.recordsReadable()) : slot.seal
+          if (seal === 'password') this.assertUnlocked('store a credential record')
+          if (seal === 'machine' && this.recordsKey === void 0) {
+            this.requireRecordsKey()
+            await this.persistState()
+          }
+          const sealed = this.sealRecord(key, next, seal, this.key)
+          const nextRecords = new Map(this.records)
+          nextRecords.set(key, sealed)
+          const nextText = this.serializeSnapshot(this.entries, nextRecords, this.remember)
+          if (nextText !== this.text) {
+            await writeFileAtomic(this.spec.filename, nextText, { mode: 384, dirMode: 448 })
+            this.text = nextText
+          }
+          this.records = nextRecords
+        } else {
+          const nextText = renderPlainDocument(this.text, { kind: 'record', key, record: next })
+          if (nextText !== this.text) {
+            await writeFileAtomic(this.spec.filename, nextText, { mode: 384, dirMode: 448 })
+            this.text = nextText
+          }
+          const nextRecords = new Map(this.records)
+          nextRecords.set(key, { form: 'plain', record: next })
+          this.records = nextRecords
+        }
+        this.notifyRecordUpdated(key)
+        return next
+      })
+    })
+  }
+  /**
+   * Remove one record under the store's file lock; removing an absent record
+   * is a no-op. Works while locked — dropping ciphertext needs no key.
+   * @param key - the record to remove.
+   */
+  async deleteRecord(key: CredentialKey): Promise<void> {
+    if (this.refusePlain) {
+      throw new VaultError(
+        'VAULT_INVALID',
+        'credential records are unavailable while the credential file is plaintext; set the password again in Settings → 加密安全 to re-encrypt it',
+      )
+    }
+    if (this.isClosed()) throw new Error(`dsh-encrypt is disposed: cannot delete record "${key}"`)
+    await this.enqueue(async () => {
+      if (this.isClosed()) throw new Error(`dsh-encrypt was disposed before the queued "${key}" record deletion ran`)
+      await mkdir(dirname(this.spec.filename), { recursive: true, mode: 448 })
+      await withFileLock(this.spec.filename, async () => {
+        await this.reconcileFromDisk()
+        if (this.refusePlain) {
+          throw new VaultError(
+            'VAULT_INVALID',
+            'credential records are unavailable because ciphertext is required; set the password again to create a new encrypted store',
+          )
+        }
+        if (!this.records.has(key)) return
+        const nextRecords = new Map(this.records)
+        nextRecords.delete(key)
+        if (this.format === 'encrypted') {
+          const nextText = this.serializeSnapshot(this.entries, nextRecords, this.remember)
+          if (nextText !== this.text) {
+            await writeFileAtomic(this.spec.filename, nextText, { mode: 384, dirMode: 448 })
+            this.text = nextText
+          }
+        } else {
+          const nextText = renderPlainDocument(this.text, { kind: 'record', key, record: void 0 })
+          if (nextText !== this.text) {
+            await writeFileAtomic(this.spec.filename, nextText, { mode: 384, dirMode: 448 })
+            this.text = nextText
+          }
+        }
+        this.records = nextRecords
+        this.notifyRecordUpdated(key)
+      })
+    })
+  }
+  /**
+   * Fan the reference event out under the current name and, contained, under
+   * the legacy `credentials/updated` name older dsh lines still listen to.
+   * @param ref - the reference whose stored value changed.
+   */
+  protected override notifyUpdated(ref: CredentialRef): void {
+    super.notifyUpdated(ref)
+    const args = ['credentials/updated', ref]
+    for (const listener of this.ctx.events.dispatch('emit', args) as Array<(...listenerArgs: unknown[]) => unknown>) {
+      try {
+        const returned = listener(ref)
+        if (returned != null && typeof (returned as PromiseLike<unknown>).then === 'function') {
+          void Promise.resolve(returned as PromiseLike<unknown>).then(undefined, (error: unknown) => {
+            this.warnLegacyListenerFailure(ref, error)
+          })
+        }
+      } catch (error) {
+        this.warnLegacyListenerFailure(ref, error)
+      }
+    }
+  }
+  /** Report one failed legacy `credentials/updated` listener without changing the committed outcome. */
+  private warnLegacyListenerFailure(ref: CredentialRef, error: unknown): void {
+    this.ctx.logger.warn('dsh-encrypt: a legacy "credentials/updated" listener failed for %s', ref)
+    this.ctx.logger.warn(error)
+  }
   async set(ref: CredentialRef, value: string): Promise<void> {
     if (value.length === 0) throw new Error(`dsh-encrypt: an empty value cannot be stored for "${ref}"; use unset`)
     await this.write(ref, value)
@@ -841,14 +1366,14 @@ class EncryptedCredentialProvider extends CredentialProvider {
           const next = new Map<string, EntryRecord>(this.entries)
           if (value === void 0) next.delete(ref)
           else next.set(ref, encryptEntry(this.key, ref, value))
-          const nextText = serializeEncryptedStore(next, this.key, this.salt, this.params, this.remember, this.kdf)
+          const nextText = this.serializeSnapshot(next, this.records, this.remember)
           if (nextText === this.text) return
           await writeFileAtomic(this.spec.filename, nextText, { mode: 384, dirMode: 448 })
           this.text = nextText
           this.entries = next
           if (value !== void 0) this.leakGuard.add(value, ref)
         } else {
-          const nextText = renderPlainDocument(this.text, ref, value)
+          const nextText = renderPlainDocument(this.text, { kind: 'ref', ref, value })
           if (nextText === this.text) return
           await writeFileAtomic(this.spec.filename, nextText, { mode: 384, dirMode: 448 })
           this.text = nextText
@@ -907,6 +1432,8 @@ class EncryptedCredentialProvider extends CredentialProvider {
       this.text = void 0
       this.format = 'plain'
       this.entries = /* @__PURE__ */ new Map()
+      this.records = /* @__PURE__ */ new Map()
+      this.verifier = void 0
       this.remember = void 0
       this.dropKey()
       this.unlocked = true
@@ -923,6 +1450,8 @@ class EncryptedCredentialProvider extends CredentialProvider {
       this.text = text
       this.format = 'encrypted'
       this.entries = parsed.entries
+      this.adoptSealedRecords(parsed.records)
+      this.verifier = parsed.verifier
       this.salt = parsed.salt
       this.params = parsed.params
       this.kdf = parsed.kdf
@@ -931,20 +1460,23 @@ class EncryptedCredentialProvider extends CredentialProvider {
       this.dropKey()
       return
     }
-    const next = parsePlainEntries(text, this.spec.filename)
+    const parsed = parsePlainDocument(text, this.spec.filename)
+    if (parsed.ignoredKeys.length > 0) this.logIgnoredPlainKeys(parsed.ignoredKeys)
     if (this.stateEncrypted === true) {
       // Ciphertext-only policy: never serve plaintext. While unlocked,
       // the external plaintext edit is re-encrypted in place immediately;
       // while locked, the last good encrypted snapshot is kept.
       if (this.unlocked && this.key !== void 0) {
         this.assertUnlocked('re-encrypt an external plaintext edit')
-        const records = new Map<string, EntryRecord>()
-        for (const [ref, value] of next) records.set(ref, encryptEntry(this.key, ref, value))
-        const cipher = serializeEncryptedStore(records, this.key, this.salt, this.params, this.remember, this.kdf)
+        const entries = new Map<string, EntryRecord>()
+        for (const [ref, value] of parsed.refs) entries.set(ref, encryptEntry(this.key, ref, value))
+        const records = await this.sealRecordsFromPlain(parsed.records, this.key)
+        const cipher = this.serializeSnapshot(entries, records, this.remember)
         await writeFileAtomic(this.spec.filename, cipher, { mode: 384, dirMode: 448 })
         this.text = cipher
         this.format = 'encrypted'
-        this.entries = records
+        this.entries = entries
+        this.records = records
         this.unlocked = true
         this.leakGuard.clear()
         this.ctx.logger.warn(
@@ -961,17 +1493,27 @@ class EncryptedCredentialProvider extends CredentialProvider {
       return
     }
     const changed: CredentialRef[] = []
-    for (const ref of new Set([...this.entries.keys(), ...next.keys()])) {
-      if (refChanged(this.entries, next, ref)) changed.push(credentialRef(ref))
+    for (const ref of new Set([...this.entries.keys(), ...parsed.refs.keys()])) {
+      if (refChanged(this.entries, parsed.refs, ref)) changed.push(credentialRef(ref))
+    }
+    const changedRecords: CredentialKey[] = []
+    for (const key of new Set([...this.records.keys(), ...parsed.records.keys()])) {
+      const record = parsed.records.get(key)
+      const nextSlot: PlainRecordValue | undefined = record === void 0 ? void 0 : { form: 'plain', record }
+      if (recordSignature(this.records.get(key)) !== recordSignature(nextSlot))
+        changedRecords.push(parseCredentialKey(key))
     }
     this.text = text
     this.format = 'plain'
-    this.entries = next
+    this.entries = parsed.refs
+    this.records = plainRecordMap(parsed.records)
+    this.verifier = void 0
     this.remember = void 0
     this.dropKey()
     this.unlocked = true
     this.syncGuard()
     for (const ref of changed) this.notifyUpdated(ref)
+    for (const key of changedRecords) this.notifyRecordUpdated(key)
   }
   // ── remembered-login window (localhost-only; the browser surface lives in ./web.js) ──
 
@@ -1019,12 +1561,13 @@ class EncryptedCredentialProvider extends CredentialProvider {
     if (parsed.state.encrypted === true) this.stateEncrypted = true
     if (parsed.state.unlockFailures !== void 0) this.unlockFailures = parsed.state.unlockFailures
     if (parsed.state.unlockLockedUntil !== void 0) this.unlockLockedUntil = parsed.state.unlockLockedUntil
+    if (parsed.state.recordsKey !== void 0) this.recordsKey = parseMasterKey(parsed.state.recordsKey)
   }
 
   /**
-   * Write the runtime state file: the remembered-login window plus the
-   * ciphertext-only policy flag. Never throws — state persistence must not
-   * break credential operations.
+   * Write the runtime state file: the remembered-login window, the
+   * ciphertext-only policy flag, and the installation records key. Never
+   * throws — state persistence must not break credential operations.
    */
   async persistState(): Promise<void> {
     try {
@@ -1035,6 +1578,7 @@ class EncryptedCredentialProvider extends CredentialProvider {
         encrypted: this.stateEncrypted,
         unlockFailures: this.unlockFailures,
         unlockLockedUntil: this.unlockLockedUntil,
+        recordsKey: this.recordsKey === void 0 ? void 0 : encodeMasterKey(this.recordsKey),
       })
       await writeFileAtomic(this.spec.stateFile, text, { mode: 384, dirMode: 448 })
     } catch (error) {
@@ -1073,7 +1617,7 @@ class EncryptedCredentialProvider extends CredentialProvider {
         // of crashing on the missing key.
         if (this.remember !== void 0 && this.key !== void 0 && this.unlocked) {
           this.assertUnlocked('change remembered-login settings')
-          const text = serializeEncryptedStore(this.entries, this.key, this.salt, this.params, void 0, this.kdf)
+          const text = this.serializeSnapshot(this.entries, this.records, void 0)
           await writeFileAtomic(this.spec.filename, text, { mode: 384, dirMode: 448 })
           this.text = text
           this.remember = void 0
@@ -1106,7 +1650,7 @@ class EncryptedCredentialProvider extends CredentialProvider {
       await this.reconcileFromDisk()
       this.assertUnlocked('issue a remembered login')
       const created = createRememberBlock(this.key, days)
-      const text = serializeEncryptedStore(this.entries, this.key, this.salt, this.params, created.block, this.kdf)
+      const text = this.serializeSnapshot(this.entries, this.records, created.block)
       await writeFileAtomic(this.spec.filename, text, { mode: 384, dirMode: 448 })
       this.text = text
       this.remember = created.block
@@ -1172,7 +1716,7 @@ class EncryptedCredentialProvider extends CredentialProvider {
       await this.reconcileFromDisk()
       if (this.remember === void 0 || this.effectiveDays() !== 0 || !this.unlocked || this.key === void 0) return
       this.assertUnlocked('revoke a remembered login')
-      const text = serializeEncryptedStore(this.entries, this.key, this.salt, this.params, void 0, this.kdf)
+      const text = this.serializeSnapshot(this.entries, this.records, void 0)
       await writeFileAtomic(this.spec.filename, text, { mode: 384, dirMode: 448 })
       this.text = text
       this.remember = void 0
@@ -1191,7 +1735,7 @@ export {
   EncryptedCredentialProvider as default,
   VaultError,
   assertOwnerOnly,
-  parsePlainEntries,
+  parsePlainDocument,
   renderPlainDocument,
   resolveSpec,
   type ProviderConfig,

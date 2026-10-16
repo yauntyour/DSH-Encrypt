@@ -66,6 +66,34 @@ export function trimTrailingCharacter(value: string, character: string): string 
   return value.slice(0, end)
 }
 
+/**
+ * Whether a value follows the credential-record key grammar: exactly two
+ * `/`-joined lowercase hyphenated segments (`scope/id`), the same grammar the
+ * credential seam's `credentialKey` builds.
+ */
+export function isCredentialKeyName(value: string): boolean {
+  const slash = value.indexOf('/')
+  if (slash === -1 || slash !== value.lastIndexOf('/')) return false
+  return isCredentialKeySegment(value.slice(0, slash)) && isCredentialKeySegment(value.slice(slash + 1))
+}
+
+/** Whether one credential-key segment is a lowercase hyphenated identifier. */
+function isCredentialKeySegment(value: string): boolean {
+  if (value.length === 0) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    const lower = code >= 97 && code <= 122
+    const digit = code >= 48 && code <= 57
+    const hyphen = code === 45
+    if (index === 0) {
+      if (!lower) return false
+      continue
+    }
+    if (!lower && !digit && !hyphen) return false
+  }
+  return true
+}
+
 /** Fold CRLF and lone CR line endings into LF. */
 export function normalizeLineEndings(value: string): string {
   return value.replaceAll('\r\n', '\n').replaceAll('\r', '\n')

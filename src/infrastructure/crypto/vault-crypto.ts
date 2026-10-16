@@ -25,6 +25,7 @@ import { validatePasswordKeyFileShape } from '../../domain/vault/schemas.js'
 import {
   isAsciiHex,
   isAsciiLowerHex,
+  isCredentialKeyName,
   isCredentialReference,
   isPlainRecord,
   trimTrailingCharacter,
@@ -264,13 +265,23 @@ export function encryptEntry(key: Buffer, ref: string, plaintext: string): Entry
   if (typeof plaintext !== 'string' || plaintext.length === 0) {
     throw new VaultError('VAULT_INVALID', `the plaintext for "${ref}" must be a non-empty string`)
   }
-  const nonce = randomBytes(NONCE_BYTES)
-  const cipher = createCipheriv('aes-256-gcm', key, nonce)
-  cipher.setAAD(Buffer.from(ref, 'utf8'))
-  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
-  const tag = cipher.getAuthTag()
-  const data = Buffer.concat([nonce, ciphertext, tag]).toString('base64url')
-  return { data, sha3: fingerprint(data) }
+  return sealText(key, ref, plaintext)
+}
+
+/**
+ * Encrypt one record payload and bind it to its credential key with GCM AAD.
+ * The record grammar is disjoint from the reference grammar, so a record
+ * ciphertext can never authenticate as an entry ciphertext and vice versa.
+ */
+export function encryptRecordPayload(key: Buffer, recordKey: string, plaintext: string): EntryRecord {
+  assertMasterKey(key)
+  if (!isCredentialKeyName(recordKey)) {
+    throw new VaultError('VAULT_INVALID', `record key "${recordKey}" is not a credential key (scope/id)`)
+  }
+  if (typeof plaintext !== 'string' || plaintext.length === 0) {
+    throw new VaultError('VAULT_INVALID', `the record payload for "${recordKey}" must be a non-empty string`)
+  }
+  return sealText(key, recordKey, plaintext)
 }
 
 /** Decrypt one entry into an erasure-capable buffer. */
@@ -280,27 +291,17 @@ export function decryptEntryBuffer(key: Buffer, ref: string, record: unknown): B
     throw new VaultError('VAULT_INVALID', `reference "${ref}" is not a credential reference`)
   }
   verifyEntryRecord(ref, record)
-  let blob: Buffer
-  try {
-    blob = Buffer.from(record.data, 'base64url')
-  } catch {
-    throw new VaultError('VAULT_CORRUPTED', `entry "${ref}" is not valid base64url`)
+  return openText(key, ref, record)
+}
+
+/** Decrypt one record payload into an erasure-capable buffer. */
+export function decryptRecordPayloadBuffer(key: Buffer, recordKey: string, record: unknown): Buffer {
+  assertMasterKey(key)
+  if (!isCredentialKeyName(recordKey)) {
+    throw new VaultError('VAULT_INVALID', `record key "${recordKey}" is not a credential key (scope/id)`)
   }
-  if (blob.length <= NONCE_BYTES + TAG_BYTES) throw new VaultError('VAULT_CORRUPTED', `entry "${ref}" is truncated`)
-  const nonce = blob.subarray(0, NONCE_BYTES)
-  const tag = blob.subarray(blob.length - TAG_BYTES)
-  const ciphertext = blob.subarray(NONCE_BYTES, blob.length - TAG_BYTES)
-  try {
-    const decipher = createDecipheriv('aes-256-gcm', key, nonce)
-    decipher.setAAD(Buffer.from(ref, 'utf8'))
-    decipher.setAuthTag(tag)
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()])
-  } catch {
-    throw new VaultError(
-      'VAULT_KEY_MISMATCH',
-      `entry "${ref}" failed AES-256-GCM authentication: the master key does not match this document, or the ciphertext was replaced`,
-    )
-  }
+  verifyEntryRecord(recordKey, record)
+  return openText(key, recordKey, record)
 }
 
 /** Decrypt one entry into an immutable string and erase its intermediate buffer. */
@@ -309,6 +310,50 @@ export function decryptEntry(key: Buffer, ref: string, record: unknown): string 
   const text = plain.toString('utf8')
   zeroizeBuffer(plain)
   return text
+}
+
+/** Decrypt one record payload into an immutable string and erase its intermediate buffer. */
+export function decryptRecordPayload(key: Buffer, recordKey: string, record: unknown): string {
+  const plain = decryptRecordPayloadBuffer(key, recordKey, record)
+  const text = plain.toString('utf8')
+  zeroizeBuffer(plain)
+  return text
+}
+
+/** Seal UTF-8 text as `nonce ‖ ciphertext ‖ tag` base64url with the AAD label. */
+function sealText(key: Buffer, label: string, plaintext: string): EntryRecord {
+  const nonce = randomBytes(NONCE_BYTES)
+  const cipher = createCipheriv('aes-256-gcm', key, nonce)
+  cipher.setAAD(Buffer.from(label, 'utf8'))
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+  const tag = cipher.getAuthTag()
+  const data = Buffer.concat([nonce, ciphertext, tag]).toString('base64url')
+  return { data, sha3: fingerprint(data) }
+}
+
+/** Open one verified ciphertext under the AAD label. */
+function openText(key: Buffer, label: string, record: EntryRecord): Buffer {
+  let blob: Buffer
+  try {
+    blob = Buffer.from(record.data, 'base64url')
+  } catch {
+    throw new VaultError('VAULT_CORRUPTED', `entry "${label}" is not valid base64url`)
+  }
+  if (blob.length <= NONCE_BYTES + TAG_BYTES) throw new VaultError('VAULT_CORRUPTED', `entry "${label}" is truncated`)
+  const nonce = blob.subarray(0, NONCE_BYTES)
+  const tag = blob.subarray(blob.length - TAG_BYTES)
+  const ciphertext = blob.subarray(NONCE_BYTES, blob.length - TAG_BYTES)
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, nonce)
+    decipher.setAAD(Buffer.from(label, 'utf8'))
+    decipher.setAuthTag(tag)
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()])
+  } catch {
+    throw new VaultError(
+      'VAULT_KEY_MISMATCH',
+      `entry "${label}" failed AES-256-GCM authentication: the master key does not match this document, or the ciphertext was replaced`,
+    )
+  }
 }
 
 function assertMasterKey(key: Buffer): void {

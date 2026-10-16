@@ -16,18 +16,35 @@
 
 依赖方向以领域类型为中心。密码学模块不读取文件，文档模块不处理 HTTP，HTTP schema 不调用 Provider，客户端不导入 Node API。
 
+## 与 dsh 的接缝
+
+插件继承运行时提供的 `CredentialProvider` 抽象类，并实现凭证接缝的全部方法：引用半边(`resolve`/`describe`/`set`/`unset`)与记录半边(`readRecord`/`describeRecord`/`listRecords`/`modifyRecord`/`deleteRecord`)。插件不锁定 dsh 版本：`src/compat.ts` 只识别启动它的 dsh 版本并记入日志，实际不兼容时在对应的接缝调用点明确报错。
+
+引用变更发 `credentials/reference-updated`(当前线)并同时发 `credentials/updated`(旧线监听)事件；记录变更发 `credentials/record-updated`。解锁后，所有 `password` 封装的记录重新宣告一次，让锁定期间读到空的消费方刷新。
+
 ## Vault 组合
 
 `src/vault.ts` 维持原有包导出。实际实现由以下模块组成：
 
 1. `domain/vault/model.ts` 定义文档常量、类型和 `VaultError`。
-2. `domain/vault/schemas.ts` 用 Valibot 校验持久化文档。
-3. `infrastructure/crypto/vault-crypto.ts` 处理 Argon2id、scrypt、AES-GCM、SHA3 和密钥清零。
-4. `infrastructure/persistence/vault-document.ts` 处理规范化序列化、结构校验和文档指纹。
-5. `application/password-service.ts` 处理设密、解锁和密码证明。
-6. `application/remember-service.ts` 处理票据签发、有效期和主密钥恢复。
+2. `domain/vault/schemas.ts` 用 Valibot 校验持久化文档(含 v4 `records` 段)。
+3. `domain/vault/records.ts` 校验凭证记录载荷(api-key / grant)，规则与凭证接缝一致且不回显任何值。
+4. `infrastructure/crypto/vault-crypto.ts` 处理 Argon2id、scrypt、AES-GCM、SHA3 和密钥清零。
+5. `infrastructure/persistence/vault-document.ts` 处理规范化序列化、结构校验、文档指纹和记录密文。
+6. `infrastructure/persistence/plain-credential-document.ts` 处理明文 YAML 的版式布局、扁平布局迁移与未知字段报告。
+7. `application/password-service.ts` 处理设密、解锁和密码证明。
+8. `application/remember-service.ts` 处理票据签发、有效期和主密钥恢复。
 
 每个模块都可以通过内存输入单独测试。磁盘文档格式、公开函数名和稳定错误码由兼容入口保持。
+
+## 记录封装与锁定语义
+
+记录以两种封装存于密文文档的 `records` 段(v4 起；无记录时仍写 v3 以便回退)：
+
+- `password`：用保险库密钥封装，逻辑与引用密文一致。
+- `machine`：用运行时状态文件中的安装密钥(`recordsKey`)封装，锁定期间照常可读——本地浏览器会话、账号平台等启动期消费方无需密码。
+
+已有记录的封装不再改变；锁定期间新建的记录只能是 `machine`。锁定语义：`readRecord` 对 `password` 封装返回 `undefined`(启动路径安全)，`describeRecord` 标记 `writable: false`，`modifyRecord` 对已存在的 `password` 记录抛 `VAULT_LOCKED`，删除与 `machine` 写入无需解锁。安装密钥必须先写入状态文件，再写入依赖它的密文；状态文件丢键时，无法解读的 `machine` 密文按错误记录并丢弃，下次写入重新生成。
 
 ## 校验策略
 
@@ -46,7 +63,7 @@
 
 `src/web.ts` 只组合路由、访问检查和应用操作。共享 HTTP 结构及限量请求读取位于传输层；HTTP 与 WebSocket 输出脱敏位于安全层。
 
-运行时状态文件按字段独立校验。一个损坏字段不会抹掉同文件内其他有效字段。Provider 只把加密记录保存在长期快照中；明文只存在于一次解析或回调期间。
+运行时状态文件按字段独立校验。一个损坏字段不会抹掉同文件内其他有效字段。Provider 只把加密记录保存在长期快照中；明文只存在于一次解析或回调期间。状态文件还保存安装密钥(`recordsKey`)：它不参与锁定状态，只用于 `machine` 记录，失败校验不会影响其他字段。
 
 ## 变更规则
 

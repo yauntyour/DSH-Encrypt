@@ -1,4 +1,5 @@
-import type { Argon2Params, EntryRecord, RememberBlock, ScryptParams } from './model.js'
+import type { Argon2Params, EntryRecord, RecordSeal, RememberBlock, ScryptParams } from './model.js'
+import type { CredentialRecord } from '@deepseek-ai/dsh-credentials'
 import {
   check,
   finite,
@@ -18,13 +19,14 @@ import {
   unknown,
   union,
 } from 'valibot'
-import { isCredentialReference } from '../../shared/validation/primitives.js'
+import { isCredentialKeyName, isCredentialReference } from '../../shared/validation/primitives.js'
 import {
   ARGON2_MAX_MEMORY_KIB,
   ARGON2_MAX_PARALLELISM,
   ARGON2_MAX_TIME,
   ENCRYPTED_STORE_FORMAT,
   LEGACY_KDF,
+  RECORD_VAULT_VERSION,
   REMEMBER_BLOCK_VERSION,
   SCRYPT_MAX_N,
   SCRYPT_MAX_P,
@@ -67,7 +69,23 @@ interface Argon2EncryptedStoreShape extends EncryptedStoreBaseShape, Argon2Param
   r?: unknown
 }
 
-export type EncryptedStoreShape = LegacyEncryptedStoreShape | Argon2EncryptedStoreShape
+/** One sealed record entry as stored in a v4 encrypted document. */
+export interface SealedRecordEntryShape {
+  kind: CredentialRecord['kind']
+  seal: RecordSeal
+  data: string
+  sha3: string
+}
+
+interface RecordedEncryptedStoreShape extends EncryptedStoreBaseShape, Argon2Params {
+  version: typeof RECORD_VAULT_VERSION
+  kdf: typeof VAULT_KDF
+  n?: unknown
+  r?: unknown
+  records: Record<string, SealedRecordEntryShape>
+}
+
+export type EncryptedStoreShape = LegacyEncryptedStoreShape | Argon2EncryptedStoreShape | RecordedEncryptedStoreShape
 
 export interface PasswordKeyFileShape {
   version: number
@@ -142,7 +160,33 @@ const argon2EncryptedStoreSchema = strictObject({
   p: pipe(number(), integer(), minValue(1), maxValue(ARGON2_MAX_PARALLELISM)),
 })
 
-const encryptedStoreSchema = union([legacyEncryptedStoreSchema, argon2EncryptedStoreSchema])
+const recordKindSchema = union([literal('api-key'), literal('grant')])
+const recordSealSchema = union([literal('password'), literal('machine')])
+const sealedRecordEntrySchema = strictObject({
+  kind: recordKindSchema,
+  seal: recordSealSchema,
+  data: string(),
+  sha3: string(),
+})
+const sealedRecordsSchema = record(pipe(string(), check<string>(isCredentialKeyName)), sealedRecordEntrySchema)
+
+const recordedEncryptedStoreSchema = strictObject({
+  ...encryptedStoreBaseEntries,
+  version: literal(RECORD_VAULT_VERSION),
+  kdf: literal(VAULT_KDF),
+  m: pipe(number(), integer(), minValue(8), maxValue(ARGON2_MAX_MEMORY_KIB)),
+  t: pipe(number(), integer(), minValue(1), maxValue(ARGON2_MAX_TIME)),
+  n: optional(unknown()),
+  r: optional(unknown()),
+  p: pipe(number(), integer(), minValue(1), maxValue(ARGON2_MAX_PARALLELISM)),
+  records: sealedRecordsSchema,
+})
+
+const encryptedStoreSchema = union([
+  legacyEncryptedStoreSchema,
+  argon2EncryptedStoreSchema,
+  recordedEncryptedStoreSchema,
+])
 
 const passwordKeyFileSchema = union([
   strictObject({
