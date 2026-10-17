@@ -28,6 +28,7 @@ interface CapturingResponse {
   setHeader: (name: string, value: HeaderValue) => unknown
   getHeader: (name: string) => HeaderValue | undefined
   removeHeader: (name: string) => void
+  headersSent: boolean
 }
 
 function emptyRequest() {
@@ -39,12 +40,14 @@ function emptyRequest() {
   }
 }
 
-function capturingResponse() {
+function capturingResponse(options: { compressOnWriteHead?: boolean } = {}) {
   let body = ''
   let status = 0
   let headers: Headers = {}
+  let sent = false
   const pending = new Map<string, HeaderValue>()
   const response: CapturingResponse = {
+    headersSent: false,
     write(chunk: string | Buffer | Uint8Array): boolean {
       body += Buffer.isBuffer(chunk) || chunk instanceof Uint8Array ? Buffer.from(chunk).toString('utf8') : chunk
       return true
@@ -58,14 +61,24 @@ function capturingResponse() {
         ...Object.fromEntries(pending),
         ...(typeof statusMessageOrHeaders === 'string' ? supplied : statusMessageOrHeaders),
       }
+      sent = true
+      response.headersSent = true
+      if (options.compressOnWriteHead === true) {
+        // Mimic the host gzip middleware: it engages underneath the wrapper
+        // while the real writeHead runs and records its encoding on the response.
+        pending.set('content-encoding', 'gzip')
+        headers = { ...headers, 'content-encoding': 'gzip' }
+      }
     },
     setHeader(name: string, value: HeaderValue): void {
+      if (sent) throw new Error('ERR_HTTP_HEADERS_SENT')
       pending.set(name.toLowerCase(), value)
     },
     getHeader(name: string): HeaderValue | undefined {
       return pending.get(name.toLowerCase())
     },
     removeHeader(name: string): void {
+      if (sent) throw new Error('ERR_HTTP_HEADERS_SENT')
       pending.delete(name.toLowerCase())
     },
   }
@@ -161,6 +174,22 @@ describe('security regression coverage', () => {
     assert.equal(result.status, 500)
     assert.equal(result.body.includes(secret), false)
     assert.equal(result.body.includes('encoded response blocked'), true)
+  })
+
+  it('keeps redacting when the carrier negotiates compression beneath the wrapper', async () => {
+    const guard = new LeakGuard()
+    const secret = 'compressed-carrier-secret'
+    guard.add(secret, 'CARRIER')
+    const captured = capturingResponse({ compressOnWriteHead: true })
+    const wrapped = redactingHttpHandler(async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(secret)
+    }, guard)
+    await wrapped(emptyRequest(), captured.response)
+    const result = captured.result()
+    assert.equal(result.status, 200)
+    assert.equal(result.body, REDACTION_MARKER)
+    assert.equal(result.headers['content-encoding'], 'gzip')
   })
 
   it('closes an oversized WebSocket upgrade response instead of disabling filtering', () => {

@@ -17,6 +17,8 @@ interface HttpResponseLike {
   setHeader?: (name: string, value: ResponseHeaderValue) => unknown;
   getHeader?: (name: string) => ResponseHeaderValue | undefined;
   removeHeader?: (name: string) => unknown;
+  /** True once the response head is on the wire (node sets this on ServerResponse). */
+  headersSent?: boolean;
 }
 type HttpHandler = (req: HttpRequestLike, res: HttpResponseLike) => unknown | Promise<unknown>;
 interface UpgradeSocketLike {

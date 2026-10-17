@@ -23,7 +23,19 @@ interface RedactionContext {
   webServer: RedactionWebServer
 }
 
-/** Wrap an HTTP handler so every emitted text piece passes through the guard. */
+/**
+ * Wrap an HTTP handler so every emitted text piece passes through the guard.
+ *
+ * The wrapper must coexist with a compressing carrier *beneath* it — the host
+ * webserver's gzip middleware engages inside `writeHead` and can turn the
+ * response into an encoded one after the handler supplied plaintext headers.
+ * Redaction runs before that layer, so the pieces fed through the captured
+ * write/end stay plaintext; but once the head is on the wire the wrapper stops
+ * re-checking `Content-Encoding`, because an encoding observed then belongs to
+ * the carrier wrapping our redacted text, not to a handler emitting
+ * pre-encoded bytes. Blocking stays confined to the window before the head is
+ * sent, where the headers are still ours to replace.
+ */
 export function redactingHttpHandler(handler: HttpHandler, guard: LeakGuard): HttpHandler {
   return async (req: RequestLike, res: ResponseLike) => {
     if (!guard.enabled || typeof res.write !== 'function' || typeof res.end !== 'function') {
@@ -38,6 +50,7 @@ export function redactingHttpHandler(handler: HttpHandler, guard: LeakGuard): Ht
     let bodyMode: 'redact' | 'passthrough' | 'blocked' = 'redact'
     let blockedHeadWritten = false
     let blockedEndWritten = false
+    const headSent = (): boolean => res.headersSent === true
     res.removeHeader?.('Content-Length')
     res.removeHeader?.('ETag')
     if (originalSetHeader !== void 0) {
@@ -49,6 +62,7 @@ export function redactingHttpHandler(handler: HttpHandler, guard: LeakGuard): Ht
     }
     const blockEncodedResponse = (): void => {
       bodyMode = 'blocked'
+      if (headSent()) return
       res.removeHeader?.('Content-Encoding')
       res.removeHeader?.('Content-Length')
       res.removeHeader?.('ETag')
@@ -72,14 +86,16 @@ export function redactingHttpHandler(handler: HttpHandler, guard: LeakGuard): Ht
       }
       bodyMode = responseIsText(supplied, res) ? 'redact' : 'passthrough'
       const cleaned = bodyMode === 'redact' && supplied !== void 0 ? stripChangedBodyHeaders(supplied) : supplied
-      res.removeHeader?.('Content-Length')
-      res.removeHeader?.('ETag')
+      if (!headSent()) {
+        res.removeHeader?.('Content-Length')
+        res.removeHeader?.('ETag')
+      }
       return typeof statusMessageOrHeaders === 'string'
         ? originalWriteHead(status, statusMessageOrHeaders, cleaned)
         : originalWriteHead(status, cleaned)
     }
     res.write = (chunk: HttpChunk, encoding?: BufferEncoding | CompletionCallback, callback?: CompletionCallback) => {
-      if (bodyMode !== 'blocked' && responseIsEncoded(void 0, res)) blockEncodedResponse()
+      if (bodyMode !== 'blocked' && !headSent() && responseIsEncoded(void 0, res)) blockEncodedResponse()
       if (bodyMode === 'blocked') {
         const cb = typeof encoding === 'function' ? encoding : typeof callback === 'function' ? callback : void 0
         if (cb !== void 0) cb()
@@ -93,7 +109,7 @@ export function redactingHttpHandler(handler: HttpHandler, guard: LeakGuard): Ht
       return true
     }
     res.end = (chunk?: HttpChunk, encoding?: BufferEncoding | CompletionCallback, callback?: CompletionCallback) => {
-      if (bodyMode !== 'blocked' && responseIsEncoded(void 0, res)) blockEncodedResponse()
+      if (bodyMode !== 'blocked' && !headSent() && responseIsEncoded(void 0, res)) blockEncodedResponse()
       if (bodyMode === 'blocked') {
         const cb = typeof encoding === 'function' ? encoding : typeof callback === 'function' ? callback : void 0
         if (!blockedEndWritten) {
