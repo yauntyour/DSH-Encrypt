@@ -26,9 +26,12 @@ import type {
  * - Remembered logins: on a successful loopback password unlock the server
  *   issues a 256-bit ticket in an HttpOnly, SameSite=Strict cookie and
  *   persists only an AEAD-wrapped copy of the key in the store document.
- *   The ticket is never echoed in a response body unless the deployment
- *   opts into the localStorage-backed header channel
- *   (rememberChannel: "header"); non-loopback requests never use it.
+ *   The ticket is only echoed in a response body on the localStorage-backed
+ *   header channel: either the deployment opts into it
+ *   (rememberChannel: "header"), or the page asks for it because its carrier
+ *   cannot keep cookies (the dsh desktop shell serves `dsh-app:` documents,
+ *   replaces request Cookies, and withholds Set-Cookie). Non-loopback
+ *   requests never use either channel.
  *
  * Routes (POST application/json only — the same cross-site write fence the
  * official /api uses, plus the Host trust fence above; response:
@@ -125,6 +128,12 @@ export const inject = ['webServer', 'credentials'] as const
 
 /** Cookie carrying the browser-held remembered-login ticket. */
 export const REMEMBER_COOKIE = 'dsh-encrypt-remember'
+/** Request header carrying the ticket on the localStorage-backed channel. */
+export const REMEMBER_TICKET_HEADER = 'x-dsh-encrypt-remember'
+/** Request header that opts one request into the localStorage-backed channel. */
+export const REMEMBER_CHANNEL_HEADER = 'x-dsh-encrypt-remember-channel'
+/** Value of {@link REMEMBER_CHANNEL_HEADER} selecting the header channel. */
+export const REMEMBER_CHANNEL_HEADER_VALUE = 'header'
 /** Cookie max-age for a forever remembered login (100 years in seconds). */
 const FOREVER_MAX_AGE = 3153600000
 
@@ -155,14 +164,32 @@ export function readRememberCookie(req: unknown): string | undefined {
 
 /**
  * Read the remembered-login ticket from the explicit request header the
- * WebUI attaches. Only honored when the deployment opts into the
- * localStorage-backed header channel (rememberChannel: "header") — the
- * HttpOnly cookie is the default carrier.
+ * WebUI attaches. Only honored on the localStorage-backed header channel —
+ * the HttpOnly cookie is the default carrier.
  */
 export function readRememberHeader(req: unknown): string | undefined {
-  const header = (req as Partial<RequestLike> | null)?.headers?.['x-dsh-encrypt-remember']
+  const header = (req as Partial<RequestLike> | null)?.headers?.[REMEMBER_TICKET_HEADER]
   if (typeof header !== 'string' || header.length === 0) return void 0
   return header.trim()
+}
+
+/**
+ * Whether this request participates in the localStorage-backed header
+ * channel. The deployment config selects it globally, but a page on a carrier
+ * that cannot keep cookies may ask for it per request: the dsh desktop shell
+ * serves the WebUI from the `dsh-app:` scheme, replaces every request Cookie
+ * with its own Host authentication cookie, and withholds `Set-Cookie` from
+ * responses, so the HttpOnly ticket can neither be stored nor sent there.
+ *
+ * A cookie-mode deployment keeps its HttpOnly guarantee for ordinary browsers;
+ * only a same-origin page script can add the hint (a cross-site addition
+ * requires a CORS preflight these routes never answer), and the ticket itself
+ * is only ever issued by a loopback password operation.
+ */
+export function requestUsesHeaderChannel(req: unknown, configured: 'cookie' | 'header' | undefined): boolean {
+  if (configured === 'header') return true
+  const hint = (req as Partial<RequestLike> | null)?.headers?.[REMEMBER_CHANNEL_HEADER]
+  return typeof hint === 'string' && hint.trim().toLowerCase() === REMEMBER_CHANNEL_HEADER_VALUE
 }
 
 /** Build the Set-Cookie header issuing a remembered login. */
@@ -187,9 +214,13 @@ function rememberedPasswordResult(
   const result: JsonObject = {
     ...value,
     local: true,
+    rememberChannel: channel,
     remembered: issued !== null,
     expiresAt: issued?.expiresAt ?? null,
   }
+  // The client needs the reported channel to know whether to keep the ticket
+  // in localStorage; without it a header-channel unlock would look like a
+  // cookie-channel one and the stored ticket would be discarded.
   if (channel === 'header') result.ticket = issued?.secret
   return result
 }
@@ -368,7 +399,11 @@ export function apply(ctx: WebContext, config: WebConfig = {}): void {
   // downlink frame the web server writes. Install FIRST so the routes below
   // (and anything registered later) pass through the redaction proxy too.
   ctx.effect(() => installLeakRedaction(ctx), 'dsh-encrypt: leak-guard output redaction')
-  const channel = ctx.credentials?.config?.rememberChannel ?? 'cookie'
+  const configuredChannel = ctx.credentials?.config?.rememberChannel ?? 'cookie'
+  // The configured channel is the deployment default; a page that cannot keep
+  // cookies (the dsh desktop shell) asks for the header channel per request.
+  const channelFor = (req: RequestLike): 'cookie' | 'header' =>
+    requestUsesHeaderChannel(req, configuredChannel) ? 'header' : 'cookie'
   const trustedAccess: AccessCheck = req => {
     if (!isTrustedRequest(req, trustedHosts))
       throw new VaultError('FORBIDDEN_HOST', "this request's Host is not a trusted authority")
@@ -380,6 +415,7 @@ export function apply(ctx: WebContext, config: WebConfig = {}): void {
       operation: async (payload: unknown, req: RequestLike, cookies: CookieJar) => {
         parseEmptyRequest(payload)
         const local = isLocalRequest(req)
+        const channel = channelFor(req)
         let ticketRejected = false
         if (local) {
           // The cookie channel ignores the header ticket entirely, so
@@ -392,7 +428,7 @@ export function apply(ctx: WebContext, config: WebConfig = {}): void {
             } catch (error) {
               const code = (error as { code?: unknown } | null)?.code
               if (code === 'REMEMBER_EXPIRED' || code === 'REMEMBER_INVALID') {
-                ctx.logger.warn?.('dsh-encrypt: remembered-login ticket rejected (%s); clearing the cookie', code)
+                ctx.logger.warn?.('dsh-encrypt: remembered-login ticket rejected (%s); clearing it', code)
                 cookies.clear()
                 ticketRejected = true
               } else if (code !== 'VAULT_NOT_ENCRYPTED') {
@@ -402,35 +438,35 @@ export function apply(ctx: WebContext, config: WebConfig = {}): void {
           }
         }
         const status = await ctx.credentials.status()
-        return { ...status, local, ticketRejected }
+        return { ...status, rememberChannel: channel, local, ticketRejected }
       },
     },
     {
       path: '/api/credentials.unlock',
       accessCheck: assertLocal,
-      operation: async (payload: unknown, _req: RequestLike, cookies: CookieJar) => {
+      operation: async (payload: unknown, req: RequestLike, cookies: CookieJar) => {
         const request = parseDigestRequest(payload)
         const value = await ctx.credentials.unlock(request.digest)
-        return rememberedPasswordResult(value, await ctx.credentials.issueRemember(), cookies, channel)
+        return rememberedPasswordResult(value, await ctx.credentials.issueRemember(), cookies, channelFor(req))
       },
     },
     {
       path: '/api/credentials.set-password',
       accessCheck: assertLocal,
-      operation: async (payload: unknown, _req: RequestLike, cookies: CookieJar) => {
+      operation: async (payload: unknown, req: RequestLike, cookies: CookieJar) => {
         const request = parseDigestRequest(payload)
         const value = await ctx.credentials.setPassword(request.digest)
-        return rememberedPasswordResult(value, await ctx.credentials.issueRemember(), cookies, channel)
+        return rememberedPasswordResult(value, await ctx.credentials.issueRemember(), cookies, channelFor(req))
       },
     },
     {
       path: '/api/credentials.change-password',
       accessCheck: assertLocal,
-      operation: async (payload: unknown, _req: RequestLike, cookies: CookieJar) => {
+      operation: async (payload: unknown, req: RequestLike, cookies: CookieJar) => {
         const request = parseChangePasswordRequest(payload)
         cookies.clear()
         const value = await ctx.credentials.changePassword(request.oldDigest, request.digest)
-        return rememberedPasswordResult(value, await ctx.credentials.issueRemember(), cookies, channel)
+        return rememberedPasswordResult(value, await ctx.credentials.issueRemember(), cookies, channelFor(req))
       },
     },
 
@@ -439,6 +475,7 @@ export function apply(ctx: WebContext, config: WebConfig = {}): void {
       accessCheck: trustedAccess,
       operation: async (payload: unknown, req: RequestLike, cookies: CookieJar) => {
         const request = parseConfigRequest(payload)
+        const channel = channelFor(req)
         let ticket
         if (request.action === 'set') {
           assertLocal(req)
@@ -451,7 +488,8 @@ export function apply(ctx: WebContext, config: WebConfig = {}): void {
           }
         }
         const status = await ctx.credentials.status()
-        const result: JsonObject = { ...status, local: isLocalRequest(req) }
+        const result: JsonObject = { ...status, rememberChannel: channel, local: isLocalRequest(req) }
+        if (request.action === 'set') result.remembered = ticket !== undefined
         if (channel === 'header') result.ticket = ticket
         return result
       },

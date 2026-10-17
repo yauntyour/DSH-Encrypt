@@ -1061,6 +1061,12 @@ class EncryptedCredentialProvider extends CredentialProvider {
       })
     })
   }
+  /**
+   * Describe one reference without resolving it. While a password-encrypted
+   * store is locked the answer still reports stored references as configured
+   * (existence only — the value remains unreadable) and never writable, so a
+   * boot-time configuration check sees the credential without its secret.
+   */
   async describe(ref: CredentialRef): Promise<CredentialInfo> {
     if (this.refusePlain) {
       return Promise.resolve({
@@ -1077,9 +1083,17 @@ class EncryptedCredentialProvider extends CredentialProvider {
       })
     }
     if (this.format === 'encrypted' && !this.unlocked) {
+      // A locked vault still knows which references exist: the entry names live
+      // in the clear. Report that presence (values stay unreadable — resolve
+      // throws VAULT_LOCKED — and writes stay refused) so boot-time consumers
+      // that only ask whether a credential is configured, such as the desktop
+      // welcome gate and the provider directory, do not mistake a locked vault
+      // for an empty one and send the user through onboarding again.
+      const stored = this.entries.get(ref) !== void 0
+      const fallback = stored ? void 0 : this.dotenvFallback(ref)
       return Promise.resolve({
-        configured: false,
-        source: 'locked',
+        configured: stored || fallback !== void 0,
+        source: fallback !== void 0 ? fallback.source : 'locked',
         writable: false,
       })
     }

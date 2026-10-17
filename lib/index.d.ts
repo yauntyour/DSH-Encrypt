@@ -369,6 +369,12 @@ declare class EncryptedCredentialProvider extends CredentialProvider {
   };
   /** Shared queue+lock+reconcile wrapper for password transitions. */
   passwordTransition<T>(operation: () => Promise<T>): Promise<T>;
+  /**
+   * Describe one reference without resolving it. While a password-encrypted
+   * store is locked the answer still reports stored references as configured
+   * (existence only — the value remains unreadable) and never writable, so a
+   * boot-time configuration check sees the credential without its secret.
+   */
   describe(ref: CredentialRef): Promise<CredentialInfo>;
   /** True while password-sealed records can be decrypted right now. */
   recordsReadable(): boolean;

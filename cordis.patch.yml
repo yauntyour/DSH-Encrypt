@@ -32,7 +32,8 @@
         # Keep the inherited environment and .env fallback layers (read-only,
         # ranked above the managed file). Set false for a strict file-only policy.
         allowEnvFallback: true
-        # rememberChannel: cookie   # 免密票据通道：cookie（默认，仅 HttpOnly）| header（响应体+localStorage，XSS 可读）
+        # rememberChannel: cookie   # 免密票据通道：cookie（默认，仅 HttpOnly）| header（响应体+localStorage，XSS 可读）；
+        #                           # dsh 桌面壳（页面运行在 dsh-app: scheme 下）无法存取 Host Cookie，会自动按 header 通道协商
         # leakGuard: true
         # leakMinMaskLength: 8
         # leakMaxMaskLength: 256

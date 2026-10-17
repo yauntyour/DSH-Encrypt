@@ -89,7 +89,15 @@ describe('dsh-encrypt single-file provider', () => {
       await assertStatus(second.provider, 'encrypted', false)
       await assert.rejects(second.provider.resolve(credentialRef('KEY')), { code: 'VAULT_LOCKED' })
       await assert.rejects(second.provider.set(credentialRef('KEY'), 'new'), { code: 'VAULT_LOCKED' })
+      // Existence is not a secret (entry names are stored in the clear), and
+      // reporting it keeps boot-time consumers such as the desktop welcome gate
+      // from treating a locked vault as unconfigured. The value stays unreadable.
       assert.deepEqual(await second.provider.describe(credentialRef('KEY')), {
+        configured: true,
+        source: 'locked',
+        writable: false,
+      })
+      assert.deepEqual(await second.provider.describe(credentialRef('MISSING')), {
         configured: false,
         source: 'locked',
         writable: false,

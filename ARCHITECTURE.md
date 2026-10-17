@@ -22,6 +22,12 @@
 
 引用变更发 `credentials/reference-updated`(当前线)并同时发 `credentials/updated`(旧线监听)事件；记录变更发 `credentials/record-updated`。解锁后，所有 `password` 封装的记录重新宣告一次，让锁定期间读到空的消费方刷新。
 
+锁定期间引用半边的 `describe` 仍对已存在的引用返回 `configured: true`、`source: "locked"`、`writable: false`：条目名本就以明文存在于文档中，而只问“是否已配置”的启动期消费方(桌面欢迎页的 API key 探测、provider 目录)若把锁定库当成空库，就会把用户重新送进引导流程；实际取值仍由 `resolve` 抛 `VAULT_LOCKED`。
+
+## 浏览器票据通道
+
+免密票据默认走 HttpOnly Cookie。dsh 桌面壳把 WebUI 挂在 `dsh-app:` 自定义 scheme 下：它用外壳自己的 Host 认证 Cookie 替换每个请求的 `Cookie`，并从响应中扣留 `Set-Cookie`，因此 HttpOnly 票据在桌面版既存不下也发不出。客户端检测到页面不是 http(s) 时自动改走 header 通道：票据存 localStorage，并在每个请求上带 `x-dsh-encrypt-remember-channel: header` 与 `x-dsh-encrypt-remember`；web 层按请求协商通道(配置的 `rememberChannel` 仍是全局默认，可强制 header)，只在选择 header 通道时把新签发的票据放进响应体，客户端据此持久化。自动解锁在页面加载、连接代际重建、可见/聚焦时触发，Host 未就绪或暂时不可达时按退避重试。
+
 ## Vault 组合
 
 `src/vault.ts` 维持原有包导出。实际实现由以下模块组成：
@@ -43,7 +49,7 @@
 记录以两种封装存于密文文档的 `records` 段(v4 起；无记录时仍写 v3 以便回退)：
 
 - `password`：用保险库密钥封装，逻辑与引用密文一致。
-- `machine`：用运行时状态文件中的安装密钥(`recordsKey`)封装，锁定期间照常可读——本地浏览器会话、账号平台等启动期消费方无需密码。
+- `machine`：用运行时状态文件中的安装密钥(`recordsKey`)封装，锁定期间照常可读——本地浏览器会话等必须在 WebUI 解锁前工作的启动期消费方无需密码。其余记录(如账号平台授权)默认仍是 `password` 封装：它们在锁定期间读取为“不存在”，解锁(含免密票据解锁)后由 `credentials/record-updated` 重宣告刷新。
 
 已有记录的封装不再改变；锁定期间新建的记录只能是 `machine`。锁定语义：`readRecord` 对 `password` 封装返回 `undefined`(启动路径安全)，`describeRecord` 标记 `writable: false`，`modifyRecord` 对已存在的 `password` 记录抛 `VAULT_LOCKED`，删除与 `machine` 写入无需解锁。安装密钥必须先写入状态文件，再写入依赖它的密文；状态文件丢键时，无法解读的 `machine` 密文按错误记录并丢弃，下次写入重新生成。
 

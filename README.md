@@ -5,7 +5,7 @@
 | 项目     | 值                                                                                                                                                                                   |
 | :------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 形态     | **bundle**(`dsh.bundle.patch` → `cordis.patch.yml`,随 profile 启动)                                                                                                                  |
-| 版本     | `0.2.0`                                                                                                                                                                              |
+| 版本     | `0.2.1`                                                                                                                                                                              |
 | 兼容基线 | dsh 接缝包 `0.2.1-alpha.5` 线(cordis `4.0.5-alpha.2`、`dsh-credentials` 等,精确钉版;构建 + 测试基线)                                                                                 |
 | 兼容策略 | **无版本围栏**:`src/compat.ts` 只识别启动它的 dsh 版本并记入日志;真正不兼容时在该接缝调用点明确报错。旧 `0.1.0-rc.x` 线可加载(记录半边为其新增能力);密文 v3 与旧扁平明文保持读取兼容 |
 | 环境     | Node.js(跟随所运行的 dsh);本仓库以 `@types/node` 26 开发                                                                                                                             |
@@ -15,7 +15,7 @@
 
 - **单文件双形态**:明文 YAML ↔ 密文 JSON 原地互转,不产生第二个文件、不迁移路径
 - **完整凭证接缝(引用 + 记录)**:引用半边存 API Key/环境变量;记录半边供插件存取结构化凭证(如 WebUI 登录用的 `client-connection/browser-session`、账号平台的授权载荷),新旧两线消费方都工作
-- **记录双封装(policy seal)**:`machine` 封装用状态文件中的安装密钥,启动期消费方(浏览器会话、账号平台)在锁定态照常读写;`password` 封装用保险库密钥,锁定期间不可读、不可改、无痕删除。封装一经建立不再改变,锁定期间新建的记录只能是 `machine`
+- **记录双封装(policy seal)**:`machine` 封装用状态文件中的安装密钥,本地浏览器会话这类必须在解锁前工作的启动期消费方在锁定态照常读写;`password` 封装用保险库密钥,锁定期间不可读、不可改、无痕删除,解锁(含免密票据解锁)后经 `credentials/record-updated` 重宣告刷新(账号平台授权记录属此类)。封装一经建立不再改变,锁定期间新建的记录只能是 `machine`
 - **AES-256-GCM**:每条凭证/记录独立随机 nonce,引用名/记录键绑定为 GCM AAD(换位即认证失败)
 - **SHA3-256 损坏检测**:条目级指纹 + 覆盖文档头部(含 `records`)的文档级指纹,损坏文件启动即被拒绝(绝不当作“空库”);密文真实性由 AES-GCM 标签提供
 - **Argon2id 密码派生**(m=64 MiB, t=3, p=1,OWASP 对齐):密码不落盘,仅存盐与 AEAD 验证器;旧版 scrypt(v2)密文仍可解锁并在解锁时自动升级
@@ -24,7 +24,7 @@
 - **解锁爆破锁定**:连续失败计数持久化(重启不清零),达阈值(默认 5 次)指数退避(30s 起、×2、上限 15min),HTTP 429 + `Retry-After`
 - **凭证泄露检测与输出脱敏(Leak Guard)**:解析过的凭证值登记为掩码模式,WebUI 的 HTTP 响应体与 WebSocket 文本帧离开主机前替换为 `[REDACTED:dsh-encrypt]`(分块边界安全的流式脱敏)
 - **发行文件一致性自校验**:构建时生成 `lib/integrity-manifest.json`(`lib/` 全部构建文件与 `cordis.patch.yml` 的 SHA3-256),启动逐文件校验,并拒绝清单遗漏、越界文件名和内容不一致;该清单用于发现安装损坏,不作为防恶意改包的信任根
-- **免密登录滑块**:0 = 每次输密码 / 1–30 天 / 永远;解锁成功后签发 256 位票据,**默认仅 HttpOnly Cookie**(响应体不回传);页面加载、**标签页重新可见/聚焦**时自动重试解锁,服务重启后切回页面即可
+- **免密登录滑块**:0 = 每次输密码 / 1–30 天 / 永远;解锁成功后签发 256 位票据,**默认仅 HttpOnly Cookie**(响应体不回传);页面加载、连接重建、**标签页重新可见/聚焦**时自动重试解锁,Host 尚在启动或暂时不可达时按退避重试。**dsh 桌面壳**(WebUI 运行在 `dsh-app:` scheme)既存不了也发不出 Host Cookie,客户端自动改走 header 通道(票据存 localStorage、请求头携带),因此桌面版同样无需进入设置页即可免密解锁
 - **仅本机密码操作**:解锁、设密、改密和免密设置都要求 Host 回环 **且** socket 回环;带代理转发头的请求不会被当成本机请求
 - **永远密文(ciphertext-only)**:设密后文件永不回退明文;外部明文替换在解锁态被立即重加密、锁定/启动态被拒绝(`plaintextForbidden`)
 - **阅后即焚**:密文只在被使用的时刻解密,中间 Buffer 立即清零,密钥在锁定/卸载时清零
@@ -56,8 +56,8 @@ bundle 形态由三个组合行构成:
 corepack enable
 pnpm install --frozen-lockfile
 pnpm pack                      # prepack 自动重建 lib/integrity-manifest.json
-dsh plugin --profile web add ./dsh-encrypt-0.2.0.tgz
-dsh plugin --profile headless add ./dsh-encrypt-0.2.0.tgz   # 如需要 headless
+dsh plugin --profile web add ./dsh-encrypt-0.2.1.tgz
+dsh plugin --profile headless add ./dsh-encrypt-0.2.1.tgz   # 如需要 headless
 ```
 
 `@node-rs/argon2` 为带预编译二进制的原生依赖,极少平台组合缺失时 `pnpm rebuild @node-rs/argon2` 即可。
@@ -118,8 +118,8 @@ dsh --profile web --dump-config | grep dsh-encrypt
     └──── 外部明文替换(重加密/拒绝) ──┘  └──────────── change-password ───────────┘
 ```
 
-- **锁定期间**:web 服务照常;继承环境凭证仍可解析,文件凭证抛 `VAULT_LOCKED`;`password` 封装记录读取为“不存在”、修改抛 `VAULT_LOCKED`;`machine` 封装记录照常读写;设置页即解锁入口
-- **免密窗口**:票据签发时写入 `issuedAt` 与 `days`;滑块改动立即作废旧票据并(解锁态)按新时长重签;打开 WebUI 自动尝试免密解锁
+- **锁定期间**:web 服务照常;继承环境凭证仍可解析,文件凭证抛 `VAULT_LOCKED`;引用 `describe` 仍报告“已配置”(仅存在性,值不可解析、不可写),因此桌面欢迎页不会把锁定库误判为未配置;`password` 封装记录读取为“不存在”、修改抛 `VAULT_LOCKED`;`machine` 封装记录照常读写;有免密票据时 WebUI 自动解锁,设置页始终保留手动解锁入口
+- **免密窗口**:票据签发时写入 `issuedAt` 与 `days`;滑块改动立即作废旧票据并(解锁态)按新时长重签;打开 WebUI 自动尝试免密解锁(普通浏览器用 HttpOnly Cookie;桌面壳自动改用 localStorage + 请求头,详见下方「免密票据通道」)
 - **忘记密码**:不可恢复(设计如此);删除 `.credentials.yaml` 后,设置页仍要求先建立新密码,随后才能重新配置凭证
 
 ## 凭证解析顺序
@@ -187,7 +187,7 @@ records: # 仅存在记录时有此段
 - v2 scrypt 密文仍可解析与解锁,成功解锁时自动原地升级为 v3 Argon2id
 - v3 ↔ v4 按需选择:无记录时写 v3(旧 rc.12 构建也能读取);一旦存在记录即写 v4
 - `verifier` 是固定明文的 AEAD 密文,用于在不接触任何真实凭证的前提下校验摘要
-- `remember` 块仅在签发过免密票据时存在:`cipher` 是票据密钥 AEAD 包裹的主密钥,版本、盐、签发时间和期限均绑定到 GCM 认证;票据本身只在浏览器 Cookie(HttpOnly),永不落盘;`days: -1` 表示永远
+- `remember` 块仅在签发过免密票据时存在:`cipher` 是票据密钥 AEAD 包裹的主密钥,版本、盐、签发时间和期限均绑定到 GCM 认证;票据本身只在浏览器侧(HttpOnly Cookie,或桌面壳下的 localStorage),永不落盘;`days: -1` 表示永远
 - `records` 每条为平铺条目:`kind` 是清晰标签(供锁定期间描述),`seal` 是封装类型,`data` 是 AEAD 密文(记录键绑定为 GCM AAD),`sha3` 是条目指纹
 - 文档级指纹覆盖 `sha3` 以外全部字段(含 `records`);成本参数有上限(防恶意构造耗尽内存/CPU)
 - 密码与票据从不落盘;`machine` 封装的安装密钥存于 `$DSH_HOME/.dsh-encrypt.json`(`recordsKey`),先落盘再写依赖它的密文
@@ -206,22 +206,24 @@ records: # 仅存在记录时有此段
 
 `rememberChannel: "header"` 可显式切回响应体回传 + localStorage + 请求头通道(XSS 可读票据,仅用于 Cookie 存取异常的 WebView);默认 Cookie 通道下,响应体永不携带票据,旧 localStorage 副本自动清理作废。headless 组合不挂载 web 行,无 HTTP 面。
 
+**免密票据通道按请求协商**:客户端在非 http(s) 页面(典型是 dsh 桌面壳的 `dsh-app:` scheme)自动发送 `x-dsh-encrypt-remember-channel: header`,web 层随即把该请求当作 header 通道处理——读取 `x-dsh-encrypt-remember` 请求头里的票据,并在响应体回传新签发的票据(响应中的 `rememberChannel` 同时变为 `header`),客户端据此把票据存进 localStorage;这解决了桌面壳「替换请求 Cookie 且扣留 `Set-Cookie`」导致免密登录永远拿不到票据的问题。普通 http(s) 浏览器不发送该提示头,仍是 HttpOnly Cookie 通道;配置项 `rememberChannel: "header"` 仍可对所有请求强制 header 通道。该提示头只能由同源脚本添加(跨源添加会触发这些路由不响应的 CORS 预检),且票据签发始终需要本机密码操作。
+
 ## 配置项
 
 provider 行 `config`:
 
-| 字段                                                   | 类型             | 默认值                        | 说明                                                                             |
-| :----------------------------------------------------- | :--------------- | :---------------------------- | :------------------------------------------------------------------------------- |
-| `path`                                                 | string           | `$DSH_HOME/.credentials.yaml` | 凭证文件绝对路径                                                                 |
-| `dshHome`                                              | string           | 运行时注入                    | Harness home                                                                     |
-| `allowEnvFallback`                                     | boolean          | `true`                        | 启用继承环境与 `.env` 回退层                                                     |
-| `passwordEnv`                                          | string           | `DSH_CREDENTIAL_PASSWORD`     | 启动自动解锁的环境变量名                                                         |
-| `watch` / `debounceMs`                                 | boolean / number | `true` / `100`                | 热重载与防抖                                                                     |
-| `rememberDays`                                         | number           | `0`                           | 免密天数:-1 永远;0 每次;1–30 天(运行时值写入 `$DSH_HOME/.dsh-encrypt.json` 优先) |
-| `rememberChannel`                                      | string           | `"cookie"`                    | 免密票据通道:cookie(默认)/ header(兼容通道)                                      |
-| `leakGuard`                                            | boolean          | `true`                        | 凭证泄露检测与输出脱敏总开关                                                     |
-| `leakMinMaskLength` / `leakMaxMaskLength`              | number           | `8` / `256`                   | 脱敏长度窗口(4–64 / 16–1024)                                                     |
-| `maxUnlockAttempts` / `lockoutBaseMs` / `lockoutMaxMs` | number           | `5` / `30000` / `900000`      | 解锁爆破锁定阈值与指数退避参数                                                   |
+| 字段                                                   | 类型             | 默认值                        | 说明                                                                                          |
+| :----------------------------------------------------- | :--------------- | :---------------------------- | :-------------------------------------------------------------------------------------------- |
+| `path`                                                 | string           | `$DSH_HOME/.credentials.yaml` | 凭证文件绝对路径                                                                              |
+| `dshHome`                                              | string           | 运行时注入                    | Harness home                                                                                  |
+| `allowEnvFallback`                                     | boolean          | `true`                        | 启用继承环境与 `.env` 回退层                                                                  |
+| `passwordEnv`                                          | string           | `DSH_CREDENTIAL_PASSWORD`     | 启动自动解锁的环境变量名                                                                      |
+| `watch` / `debounceMs`                                 | boolean / number | `true` / `100`                | 热重载与防抖                                                                                  |
+| `rememberDays`                                         | number           | `0`                           | 免密天数:-1 永远;0 每次;1–30 天(运行时值写入 `$DSH_HOME/.dsh-encrypt.json` 优先)              |
+| `rememberChannel`                                      | string           | `"cookie"`                    | 免密票据通道:cookie(默认)/ header(兼容通道);非 http(s) 页面(桌面壳)按请求自动使用 header 通道 |
+| `leakGuard`                                            | boolean          | `true`                        | 凭证泄露检测与输出脱敏总开关                                                                  |
+| `leakMinMaskLength` / `leakMaxMaskLength`              | number           | `8` / `256`                   | 脱敏长度窗口(4–64 / 16–1024)                                                                  |
+| `maxUnlockAttempts` / `lockoutBaseMs` / `lockoutMaxMs` | number           | `5` / `30000` / `900000`      | 解锁爆破锁定阈值与指数退避参数                                                                |
 
 web 行 `config`:
 
@@ -258,10 +260,10 @@ web 行 `config`:
 - 脱敏只覆盖本插件已知的值;模型把密钥经工具调用(bash/web_search/网络)外传不属输出脱敏覆盖范围;拆分/转码可绕过子串匹配
 - **服务端无法校验密码强度**:后端只见摘要,「至少 8 个字符」仅由 WebUI 前端强制;直连 API 可设置任意弱口令,摘要即口令,请自行保证强度
 - 摘要即口令等价物:捕获一次即可解锁直到改密;密码操作只接受本机请求,`trustedHosts` 不会扩大该范围
-- `rememberChannel: "header"` 的票据对页面脚本可读(XSS 可窃取);默认 Cookie 通道无此暴露面
+- `rememberChannel: "header"` 的票据对页面脚本可读(XSS 可窃取);默认 Cookie 通道无此暴露面。**dsh 桌面壳自动使用 header 通道**(其 `dsh-app:` 载体既不保存 Host 的 `Set-Cookie` 也不转发页面 Cookie),因此桌面版票据落在 localStorage:能执行页面脚本的攻击者可以读到它,这与显式 header 通道是同一取舍;CLI/浏览器访问仍保持 HttpOnly
 - 锁定计数为全局:任何能到达解锁接口的客户端故意输错即可反向锁定合法用户(DoS),属在线猜口令防御的固有代价
 - 仅本机操作的“本机”判定依赖 Host+socket:非浏览器进程仍可伪造两者,但那已是你本机可执行的任意代码等价物——护栏防的是浏览器/局域网,不是同主机恶意进程
-- 锁定期间 `password` 记录的键名与 `kind` 标签仍以清晰文本存在(用于描述与列表);只有载荷是机密
+- 锁定期间引用名与 `password` 记录的键名/`kind` 标签仍以清晰文本存在(用于描述与列表;`describe` 因此仍报告 `configured`),只有载荷是机密
 
 ## 错误码
 
@@ -305,6 +307,7 @@ pnpm pack                  # prepack 自动重建清单后打包
 
 ## 版本历史(简)
 
+- **0.2.1**:免密登录在 dsh 桌面壳(`dsh-app:` 页面)自动协商 header 票据通道,修复「桌面版每次启动仍需进入设置页解锁」;状态探测在页面加载/连接重建/聚焦时重试,Host 启动中或暂时不可达时按退避重试;锁定期间 `describe` 报告已配置引用(仅存在性),桌面欢迎页不再把锁定保险库当成未配置而拦截工作区
 - **0.1.0-rc.6 → rc.8**:KDF 输入改为密码摘要;永久密文策略;免密票据通道;阅后即焚
 - **rc.9 → rc.12**:scrypt → Argon2id(v3);解锁爆破锁定;泄露检测与输出脱敏;完整性自校验;Host 头信任围栏;改密证明当前口令;请求体上限
 - **0.2.0**:对接接缝记录半边(`readRecord`/`describeRecord`/`listRecords`/`modifyRecord`/`deleteRecord`);`machine`/`password` 双封装与 v4 文档(无记录仍写 v3);明文版式化为 `version: 1` + `refs` + `records`(旧扁平布局读取兼容、写入迁移);记录事件与解锁重宣告;引用事件新旧双发;移除运行时版本围栏(仅探测记录)。接缝包钉版升级到 `0.2.1-alpha.5` 线

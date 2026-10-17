@@ -84,6 +84,12 @@ declare const name = "dsh-encrypt-web";
 declare const inject: readonly ["webServer", "credentials"];
 /** Cookie carrying the browser-held remembered-login ticket. */
 declare const REMEMBER_COOKIE = "dsh-encrypt-remember";
+/** Request header carrying the ticket on the localStorage-backed channel. */
+declare const REMEMBER_TICKET_HEADER = "x-dsh-encrypt-remember";
+/** Request header that opts one request into the localStorage-backed channel. */
+declare const REMEMBER_CHANNEL_HEADER = "x-dsh-encrypt-remember-channel";
+/** Value of {@link REMEMBER_CHANNEL_HEADER} selecting the header channel. */
+declare const REMEMBER_CHANNEL_HEADER_VALUE = "header";
 /**
  * Whether a request is genuinely local: its Host names the loopback interface
  * AND its socket arrived from loopback. The Host half is the DNS-rebinding
@@ -97,11 +103,24 @@ declare function isLocalRequest(req: unknown): boolean;
 declare function readRememberCookie(req: unknown): string | undefined;
 /**
  * Read the remembered-login ticket from the explicit request header the
- * WebUI attaches. Only honored when the deployment opts into the
- * localStorage-backed header channel (rememberChannel: "header") — the
- * HttpOnly cookie is the default carrier.
+ * WebUI attaches. Only honored on the localStorage-backed header channel —
+ * the HttpOnly cookie is the default carrier.
  */
 declare function readRememberHeader(req: unknown): string | undefined;
+/**
+ * Whether this request participates in the localStorage-backed header
+ * channel. The deployment config selects it globally, but a page on a carrier
+ * that cannot keep cookies may ask for it per request: the dsh desktop shell
+ * serves the WebUI from the `dsh-app:` scheme, replaces every request Cookie
+ * with its own Host authentication cookie, and withholds `Set-Cookie` from
+ * responses, so the HttpOnly ticket can neither be stored nor sent there.
+ *
+ * A cookie-mode deployment keeps its HttpOnly guarantee for ordinary browsers;
+ * only a same-origin page script can add the hint (a cross-site addition
+ * requires a CORS preflight these routes never answer), and the ticket itself
+ * is only ever issued by a loopback password operation.
+ */
+declare function requestUsesHeaderChannel(req: unknown, configured: "cookie" | "header" | undefined): boolean;
 /** Build the Set-Cookie header issuing a remembered login. */
 declare function rememberCookieHeader(secret: string, days: number): string;
 /** Build the Set-Cookie header clearing a remembered login. */
@@ -150,5 +169,5 @@ declare function installLeakRedaction(ctx: WebContext): () => void;
 declare const Config: ReturnType<typeof z.object>;
 declare function apply(ctx: WebContext, config?: WebConfig): void;
 //#endregion
-export { Config, REMEMBER_COOKIE, WebConfig, apply, armSocketRedaction, clearRememberCookieHeader, inject, installLeakRedaction, isLocalRequest, name, readRememberCookie, readRememberHeader, redactingHttpHandler, redactingUpgradeRoute, rememberCookieHeader };
+export { Config, REMEMBER_CHANNEL_HEADER, REMEMBER_CHANNEL_HEADER_VALUE, REMEMBER_COOKIE, REMEMBER_TICKET_HEADER, WebConfig, apply, armSocketRedaction, clearRememberCookieHeader, inject, installLeakRedaction, isLocalRequest, name, readRememberCookie, readRememberHeader, redactingHttpHandler, redactingUpgradeRoute, rememberCookieHeader, requestUsesHeaderChannel };
 //# sourceMappingURL=web.d.ts.map

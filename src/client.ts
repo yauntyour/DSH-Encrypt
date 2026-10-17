@@ -11,6 +11,15 @@ interface ClientPlugin {
   digestPassword: (text: string) => string
 }
 
+interface ClientConnectionState {
+  getSnapshot?: () => unknown
+  subscribe?: (listener: () => void) => unknown
+}
+
+interface ClientConnection {
+  state?: ClientConnectionState
+}
+
 interface ClientContext {
   slots: {
     inject: (slot: string, callback: () => unknown) => unknown
@@ -19,6 +28,10 @@ interface ClientContext {
       component: (props: Record<string, unknown>) => React.ReactNode,
     ) => unknown
   }
+  /** Cordis service injection, when the host client kernel provides it. */
+  inject?: (deps: string[], callback: (scope: ClientContext & { connection?: ClientConnection }) => void) => unknown
+  /** Cordis effect scope (returns a disposer), when the client kernel provides it. */
+  effect?: (run: () => () => void, label: string) => unknown
 }
 
 interface ModuleLoaderWindow {
@@ -62,9 +75,13 @@ interface ButtonProps {
      *
      * Remembered logins: a slider sets how long a localhost unlock stays
      * valid without the password — 0 = every time, 1..30 days, forever.
-     * The server issues an HttpOnly ticket cookie; the panel then
-     * auto-unlocks on page load for the configured window. Non-localhost
-     * visits always require the password and cannot modify it.
+     * The server issues the ticket in an HttpOnly cookie on ordinary
+     * http(s) pages; on carriers that cannot keep cookies (the dsh desktop
+     * shell serves this UI from the `dsh-app:` scheme and replaces every
+     * request Cookie) the ticket travels in localStorage plus an explicit
+     * request header instead, and this bundle retries the status probe on
+     * load, focus, reconnect, and with backoff while the Host is booting.
+     * Non-localhost visits always require the password and cannot modify it.
      *
      * States:
      *   plain              — no password set; credentials sit as plaintext
@@ -151,29 +168,126 @@ interface ButtonProps {
       )
     }
 
-    // ── auto-unlock when the WebUI opens ─────────────────────────────────
-    // The remembered login only applies to localhost and is triggered by
-    // opening the WebUI: the bundle pings the status route (which unlocks
-    // the store from the stored ticket) as soon as the page loads.
-    function pingStatus(): void {
-      void apiPost('/api/credentials.status')
-        .then(body => {
-          if (body?.ok !== true) return
-          if (body.value?.ticketRejected || body.value?.rememberChannel !== 'header') clearStoredTicket()
-        })
-        .catch(() => {})
+    // ── auto-unlock when the WebUI opens or reconnects ───────────────────
+    // The remembered login only applies to localhost. The status route is what
+    // consumes the browser-held ticket, so this bundle pings it as soon as the
+    // page loads and retries with backoff while the Host is still booting or a
+    // transient transport failure intervenes (the desktop shell can serve the
+    // document before the Host answers, or restart the Host under an open page).
+    const PING_RETRY_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 15_000, 30_000] as const
+    let pingInFlight = false
+    let pingAgain = false
+    let pingRetryTimer: ReturnType<typeof setTimeout> | undefined
+    let pingRetryIndex = 0
+
+    function cancelPingRetry(): void {
+      if (pingRetryTimer !== undefined) {
+        clearTimeout(pingRetryTimer)
+        pingRetryTimer = undefined
+      }
     }
-    if (typeof window !== 'undefined' && typeof document !== 'undefined' && typeof fetch === 'function') {
-      pingStatus()
-      if (document.readyState !== 'complete') window.addEventListener('load', () => pingStatus(), { once: true })
-      // The server may restart while this tab stays open (e.g. after a
-      // plugin update): the status ping is what consumes the remembered
-      // login, so re-ping whenever the tab becomes visible or focused
-      // again instead of requiring a full page reload.
-      document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') pingStatus()
-      })
-      window.addEventListener('focus', () => pingStatus())
+
+    function schedulePingRetry(): void {
+      if (pingRetryTimer !== undefined) return
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return
+      const delay = PING_RETRY_DELAYS_MS[Math.min(pingRetryIndex, PING_RETRY_DELAYS_MS.length - 1)]
+      pingRetryIndex += 1
+      pingRetryTimer = setTimeout(() => {
+        pingRetryTimer = undefined
+        void pingStatus()
+      }, delay)
+    }
+
+    /** One status ping: consumes the remembered-login ticket and records its verdict. */
+    async function pingStatus(): Promise<void> {
+      if (pingInFlight) return
+      pingInFlight = true
+      try {
+        const body = await apiPost('/api/credentials.status')
+        if (body.ok !== true || body.value === undefined) {
+          // The Host answered, so retrying a rejection cannot help; only a
+          // transport failure (no JSON body at all) is worth another attempt.
+          cancelPingRetry()
+          return
+        }
+        // Cookie mode drops stale localStorage copies. The header channel
+        // keeps its ticket: it is the only carrier this page has.
+        if (body.value.ticketRejected === true || body.value.rememberChannel !== 'header') clearStoredTicket()
+        pingRetryIndex = 0
+        cancelPingRetry()
+      } catch {
+        schedulePingRetry()
+      } finally {
+        pingInFlight = false
+        if (pingAgain) {
+          pingAgain = false
+          void pingStatus()
+        }
+      }
+    }
+
+    function retryNow(): void {
+      pingRetryIndex = 0
+      cancelPingRetry()
+      if (pingInFlight) {
+        pingAgain = true
+        return
+      }
+      void pingStatus()
+    }
+
+    // Cordis reconnect hook: the dsh desktop shell keeps the page alive across
+    // Host process restarts, so a fresh "connected" generation is the moment
+    // to consume the remembered login again. The service may be absent in
+    // older or non-web client kernels, so everything is optional.
+    function watchClientConnection(ctx: ClientContext): void {
+      try {
+        ctx.inject?.(['connection'], scope => {
+          const state = scope.connection?.state
+          if (state?.subscribe === undefined || state.getSnapshot === undefined) return
+          let previous = state.getSnapshot()
+          // Return the unsubscribe so a replaced Connection service (or an
+          // unloaded plugin) does not leave the listener behind.
+          return state.subscribe(() => {
+            const next = state.getSnapshot?.()
+            if (next === 'connected' && previous !== 'connected') retryNow()
+            previous = next
+          })
+        })
+      } catch {
+        // No connection service to watch; load/focus/visibility still trigger.
+      }
+    }
+
+    // Page triggers: the first paint/unlock attempt, bfcache restore, and the
+    // visible/focused transitions that follow a Host restart. Returning a
+    // disposer keeps HMR (and re-enable) from stacking duplicate listeners.
+    function installAutoUnlock(): () => void {
+      if (typeof window === 'undefined' || typeof document === 'undefined' || typeof fetch !== 'function') {
+        return () => {}
+      }
+      const onLoad = (): void => void pingStatus()
+      const onPageShow = (): void => retryNow()
+      const onFocus = (): void => retryNow()
+      const onVisibility = (): void => {
+        if (document.visibilityState === 'visible') retryNow()
+        else cancelPingRetry()
+      }
+      const onPageHide = (): void => cancelPingRetry()
+      void pingStatus()
+      if (document.readyState !== 'complete') window.addEventListener('load', onLoad, { once: true })
+      window.addEventListener('pageshow', onPageShow)
+      window.addEventListener('focus', onFocus)
+      window.addEventListener('pagehide', onPageHide)
+      document.addEventListener('visibilitychange', onVisibility)
+      return () => {
+        window.removeEventListener('load', onLoad)
+        window.removeEventListener('pageshow', onPageShow)
+        window.removeEventListener('focus', onFocus)
+        window.removeEventListener('pagehide', onPageHide)
+        document.removeEventListener('visibilitychange', onVisibility)
+        cancelPingRetry()
+      }
     }
 
     function EncryptionSection(_props: Record<string, unknown>): React.ReactNode {
@@ -456,6 +570,9 @@ interface ButtonProps {
     //#endregion
     const inject = ['slots']
     function apply(ctx: ClientContext): void {
+      if (typeof ctx.effect === 'function') ctx.effect(installAutoUnlock, 'dsh-encrypt: remembered-login auto-unlock')
+      else installAutoUnlock()
+      watchClientConnection(ctx)
       ctx.slots.inject('settings.section', () =>
         ctx.slots.register(
           {

@@ -2,16 +2,16 @@
   "format": "dsh-encrypt-integrity",
   "version": 1,
   "files": {
-    "cordis.patch.yml": "719895696085061f51dc20ea0bf744dc2963251112598abc48f4d3695cf36881",
+    "cordis.patch.yml": "23accc86e7e22f2539ca8bc331aab07692e02162aa77db7790db6d2c06a9b967",
     "lib/client.d.ts": "c9276d6ba3ee1da66b22dd45bb3a928d2c08dc44ffaf3503dbf146d4f21588ea",
-    "lib/client.js": "19fe31d6e6faccb318ff9770ced1fcf0d39a13ee64658b89aaa2830c37d8fa71",
-    "lib/client.js.map": "5e5c4e28c468323ee177397010ed7f9b1998f7f594277c16dbbd46a65c631832",
+    "lib/client.js": "63209cffee627912c7703574eab115a02e2d208819c16047460d5838e4503372",
+    "lib/client.js.map": "521bc961e1736f2f9bd61127a4c83b57d0568a653b2805fc9fe6498d13cdf8c9",
     "lib/compat.d.ts": "2222bda7291e0ad71145ed32f43535b4178e63a9a61fba76b1955fc9ced32fbc",
     "lib/compat.js": "3ba92b48f972316a325c63d9f49d60d2d2760d0cc60383adcb47243e715b116f",
     "lib/compat.js.map": "3c3f89fe518ee361a63a080326d3cea351953c143de478a754ec586a7db45805",
-    "lib/index.d.ts": "e6b9e2012f8feb0ea4553a229eec3d16c174019407470c424eab6f608b72a908",
-    "lib/index.js": "6997139142d19d20b3be268f9f1ff6bf4e6afb1b55869454fe01e3f8217f9c1d",
-    "lib/index.js.map": "f5aeeabfe2cc1431ffeab36cb11cb1be03418c9b34425cce9acfecde2e465c65",
+    "lib/index.d.ts": "79f789662fb6b2989e638c2ac705059aa556cebc8eba347588d683c8fac9f858",
+    "lib/index.js": "1994735f208d075024fc69ec2d56357086e2c605891a4bf9843b48a93f3c66c9",
+    "lib/index.js.map": "528c9dc8f22da5e578e60c9b12625a854ee4719c2ec71cd6d6ceedc31f0300bd",
     "lib/integrity.d.ts": "888f58bc45a6a315abc9782b2aa0b5d8d057d17371968f8f3890c89898bfa78e",
     "lib/integrity.js": "ae63ceaeea70e7ab447c3d30abd9d32e6d6de59cbfa5d16b1883d95104993331",
     "lib/integrity.js.map": "183df12e52276f9892b3ba5b276209d9a2f8ef0e1782588256c615cf141df97c",
@@ -35,8 +35,8 @@
     "lib/vault-DaenHBUU.d.ts": "032ef967657357420e9c52cb166c37b0ca02beee28c1cb4ace227b439ee6bf73",
     "lib/vault.d.ts": "db938c1300453c36e29aa886bc6e43b3541442a855aa07ee3ed6ff1bd1818c86",
     "lib/vault.js": "53e2e1a07b16d552990ecde99411846ad48f4916fd41536a9586588bf77660d6",
-    "lib/web.d.ts": "7834694067de453765cac467391221d30ef87aa2a41bd08cd49e44191a53fb52",
-    "lib/web.js": "80ed3d3a80962db628fdd381c671920ab6651ecbb6f55d62b4bd4d023673e354",
-    "lib/web.js.map": "5143770cadeb050f521bfb91984d2ff36fb4f5a2f04815888707d7126bf3e129"
+    "lib/web.d.ts": "71c8feab39bb8a02bd06e5f7b65f334a7775403829ee72ce1b19668ba75cd6ed",
+    "lib/web.js": "4790d174655d35d8df69755a017d727ba6a4fc714f69ba4b0c76743ececdad90",
+    "lib/web.js.map": "85dee2849d23cd4b09603bf09146ba84559e4f99f06bd0781ae6950f2851c75f"
   }
 }
