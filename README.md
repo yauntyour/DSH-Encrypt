@@ -20,6 +20,7 @@
 - **SHA3-256 损坏检测**:条目级指纹 + 覆盖文档头部(含 `records`)的文档级指纹,损坏文件启动即被拒绝(绝不当作“空库”);密文真实性由 AES-GCM 标签提供
 - **Argon2id 密码派生**(m=64 MiB, t=3, p=1,OWASP 对齐):密码不落盘,仅存盐与 AEAD 验证器;旧版 scrypt(v2)密文仍可解锁并在解锁时自动升级
 - **摘要校验(前后端分离)**:WebUI 用纯 JS Keccak-f[1600] 计算密码的 SHA3-256,只 POST `{ digest }` 到后端;原始密码不离开浏览器
+- **宿主无 SHA3 也可运行**:node 侧 SHA3-256 优先走 `node:crypto`;Electron 宿主(BoringSSL 不支持 `sha3-256`)自动回退到与浏览器同一份纯 JS Keccak,桌面版 dsh 与 CLI 环境的摘要逐字节一致
 - **解锁爆破锁定**:连续失败计数持久化(重启不清零),达阈值(默认 5 次)指数退避(30s 起、×2、上限 15min),HTTP 429 + `Retry-After`
 - **凭证泄露检测与输出脱敏(Leak Guard)**:解析过的凭证值登记为掩码模式,WebUI 的 HTTP 响应体与 WebSocket 文本帧离开主机前替换为 `[REDACTED:dsh-encrypt]`(分块边界安全的流式脱敏)
 - **发行文件一致性自校验**:构建时生成 `lib/integrity-manifest.json`(`lib/` 全部构建文件与 `cordis.patch.yml` 的 SHA3-256),启动逐文件校验,并拒绝清单遗漏、越界文件名和内容不一致;该清单用于发现安装损坏,不作为防恶意改包的信任根

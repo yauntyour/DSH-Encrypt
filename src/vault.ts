@@ -45,6 +45,8 @@ export {
   type SealedRecordValue,
 } from './domain/vault/model.js'
 
+export { sha3_256Hex } from './infrastructure/crypto/sha3.js'
+
 export {
   argon2Defaults,
   createPasswordKeyFile,
@@ -64,7 +66,6 @@ export {
   isPasswordKeyFile,
   parseMasterKey,
   parsePasswordKeyFile,
-  sha3_256Hex,
   verifyEntryRecord,
   zeroizeBuffer,
 } from './infrastructure/crypto/vault-crypto.js'

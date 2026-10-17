@@ -1,5 +1,5 @@
 import type { Argon2Params, EntryRecord, KdfName, KdfParams, ScryptParams } from '../../domain/vault/model.js'
-import { createCipheriv, createDecipheriv, createHash, randomBytes, scrypt } from 'node:crypto'
+import { createCipheriv, createDecipheriv, randomBytes, scrypt } from 'node:crypto'
 import { hashRaw as argon2HashRaw } from '@node-rs/argon2'
 import {
   ARGON2_MAX_MEMORY_KIB,
@@ -30,15 +30,11 @@ import {
   isPlainRecord,
   trimTrailingCharacter,
 } from '../../shared/validation/primitives.js'
+import { sha3_256Hex } from './sha3.js'
 
 type Argon2Algorithm = NonNullable<NonNullable<Parameters<typeof argon2HashRaw>[1]>['algorithm']>
 
 const KEY_FILE_VERIFIER_TEXT = 'dsh-encrypt master-key verifier'
-
-/** Lowercase hex SHA3-256 of a UTF-8 text. */
-export function sha3_256Hex(text: string): string {
-  return createHash('sha3-256').update(text, 'utf8').digest('hex')
-}
 
 /** Whether a text is a valid lowercase hex SHA3-256 digest. */
 export function isDigest(value: unknown): value is string {
@@ -363,5 +359,5 @@ function assertMasterKey(key: Buffer): void {
 }
 
 function fingerprint(data: string): string {
-  return createHash('sha3-256').update(data, 'utf8').digest('hex')
+  return sha3_256Hex(data)
 }

@@ -102,9 +102,15 @@ declare class VaultError extends Error {
   constructor(code: string, message: string, details?: Record<string, unknown>);
 }
 //#endregion
-//#region src/infrastructure/crypto/vault-crypto.d.ts
-/** Lowercase hex SHA3-256 of a UTF-8 text. */
+//#region src/infrastructure/crypto/sha3.d.ts
+/**
+ * Lowercase hex SHA3-256 of UTF-8 text.
+ * @param {string} text - the text to hash.
+ * @returns {string} the 64-character lowercase hex digest.
+ */
 declare function sha3_256Hex(text: string): string;
+//#endregion
+//#region src/infrastructure/crypto/vault-crypto.d.ts
 /** Whether a text is a valid lowercase hex SHA3-256 digest. */
 declare function isDigest(value: unknown): value is string;
 /** Erase a mutable key buffer. */
@@ -254,5 +260,5 @@ declare function recoverKeyFromRemember(text: string, secretText: string): Omit<
   remember: RememberBlock;
 };
 //#endregion
-export { MASTER_KEY_BYTES as $, encryptRecordPayload as A, ARGON2_MAX_MEMORY_KIB as B, decryptRecordPayload as C, deriveScryptKey as D, deriveMasterKey as E, parseMasterKey as F, ARGON2_TIME as G, ARGON2_MAX_TIME as H, parsePasswordKeyFile as I, EntryRecord as J, Argon2Params as K, sha3_256Hex as L, generatePasswordSalt as M, isDigest as N, encodeMasterKey as O, isPasswordKeyFile as P, LEGACY_KDF as Q, verifyEntryRecord as R, decryptEntryBuffer as S, deriveArgon2idKey as T, ARGON2_MEMORY_KIB as U, ARGON2_MAX_PARALLELISM as V, ARGON2_PARALLELISM as W, KdfName as X, KEY_FILE_VERIFIER_REF as Y, KdfParams as Z, serializeEncryptedStore as _, VAULT_ALGORITHM as _t, encryptCredentialStore as a, REMEMBER_DAY_MS as at, createPasswordKeyFile as b, VAULT_VERSION as bt, PLAIN_DOCUMENT_VERSION as c, RecordValue as ct, parsePlainDocument as d, SCRYPT_N as dt, NONCE_BYTES as et, renderPlainDocument as f, SCRYPT_P as ft, serializeDocument as g, TAG_BYTES as gt, parseEncryptedStore as h, SealedRecordValue as ht, EncryptedStoreCreation as i, RECORD_VAULT_VERSION as it, generateMasterKey as j, encryptEntry as k, PlainCredentialDocument as l, RememberBlock as lt, parseDocument as m, ScryptParams as mt, recoverKeyFromRemember as n, ParsedEncryptedStore as nt, unlockEncryptedStore as o, REMEMBER_KEY_REF as ot, detectCredentialStore as p, SCRYPT_R as pt, ENCRYPTED_STORE_FORMAT as q, rememberActive as r, PlainRecordValue as rt, verifyPasswordDigest as s, RecordSeal as st, createRememberBlock as t, PASSWORD_SALT_BYTES as tt, PlainDocumentEdit as u, SCRYPT_MAXMEM as ut, verifyDocument as v, VAULT_KDF as vt, decryptRecordPayloadBuffer as w, decryptEntry as x, VaultError as xt, argon2Defaults as y, VAULT_KDF_INPUT as yt, zeroizeBuffer as z };
-//# sourceMappingURL=vault-Dd09Msle.d.ts.map
+export { MASTER_KEY_BYTES as $, encryptRecordPayload as A, ARGON2_MAX_MEMORY_KIB as B, decryptRecordPayload as C, deriveScryptKey as D, deriveMasterKey as E, parseMasterKey as F, ARGON2_TIME as G, ARGON2_MAX_TIME as H, parsePasswordKeyFile as I, EntryRecord as J, Argon2Params as K, verifyEntryRecord as L, generatePasswordSalt as M, isDigest as N, encodeMasterKey as O, isPasswordKeyFile as P, LEGACY_KDF as Q, zeroizeBuffer as R, decryptEntryBuffer as S, deriveArgon2idKey as T, ARGON2_MEMORY_KIB as U, ARGON2_MAX_PARALLELISM as V, ARGON2_PARALLELISM as W, KdfName as X, KEY_FILE_VERIFIER_REF as Y, KdfParams as Z, serializeEncryptedStore as _, VAULT_ALGORITHM as _t, encryptCredentialStore as a, REMEMBER_DAY_MS as at, createPasswordKeyFile as b, VAULT_VERSION as bt, PLAIN_DOCUMENT_VERSION as c, RecordValue as ct, parsePlainDocument as d, SCRYPT_N as dt, NONCE_BYTES as et, renderPlainDocument as f, SCRYPT_P as ft, serializeDocument as g, TAG_BYTES as gt, parseEncryptedStore as h, SealedRecordValue as ht, EncryptedStoreCreation as i, RECORD_VAULT_VERSION as it, generateMasterKey as j, encryptEntry as k, PlainCredentialDocument as l, RememberBlock as lt, parseDocument as m, ScryptParams as mt, recoverKeyFromRemember as n, ParsedEncryptedStore as nt, unlockEncryptedStore as o, REMEMBER_KEY_REF as ot, detectCredentialStore as p, SCRYPT_R as pt, ENCRYPTED_STORE_FORMAT as q, rememberActive as r, PlainRecordValue as rt, verifyPasswordDigest as s, RecordSeal as st, createRememberBlock as t, PASSWORD_SALT_BYTES as tt, PlainDocumentEdit as u, SCRYPT_MAXMEM as ut, verifyDocument as v, VAULT_KDF as vt, decryptRecordPayloadBuffer as w, decryptEntry as x, VaultError as xt, argon2Defaults as y, VAULT_KDF_INPUT as yt, sha3_256Hex as z };
+//# sourceMappingURL=vault-DaenHBUU.d.ts.map

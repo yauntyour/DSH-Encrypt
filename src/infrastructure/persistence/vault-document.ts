@@ -9,7 +9,6 @@ import type {
   SealedRecordValue,
 } from '../../domain/vault/model.js'
 import type { EncryptedStoreShape, SealedRecordEntryShape } from '../../domain/vault/schemas.js'
-import { createHash } from 'node:crypto'
 import {
   ENCRYPTED_STORE_FORMAT,
   KEY_FILE_VERIFIER_REF,
@@ -29,6 +28,7 @@ import {
   validateVaultDocumentShape,
 } from '../../domain/vault/schemas.js'
 import { isCredentialKeyName, isPlainRecord } from '../../shared/validation/primitives.js'
+import { sha3_256Hex } from '../crypto/sha3.js'
 import { argon2Defaults, createKeyVerifier, verifyEntryRecord } from '../crypto/vault-crypto.js'
 
 const STORE_FIELDS: readonly string[] = [
@@ -256,7 +256,7 @@ function fingerprintTarget(document: Record<string, unknown>): Record<string, un
 }
 
 function hashText(text: string): string {
-  return createHash('sha3-256').update(text, 'utf8').digest('hex')
+  return sha3_256Hex(text)
 }
 
 function parseJson(text: string, message: string): unknown {

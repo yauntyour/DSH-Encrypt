@@ -12,7 +12,7 @@
 | 传输     | `src/transport`      | HTTP 结构类型、请求 schema、限量读取和边界错误         | 领域层、共享校验、Valibot |
 | 安全     | `src/security`       | 字面量泄露匹配、HTTP 与 WebSocket 脱敏                 | LeakGuard 的窄接口        |
 | 客户端   | `src/client`         | 浏览器 SHA3、API、票据存储、界面状态映射               | 浏览器标准 API            |
-| 共享     | `src/shared`         | 无状态、无平台依赖的字符和文本校验                     | 无项目内依赖              |
+| 共享     | `src/shared`         | 无状态、无平台依赖的字符文本校验与纯 JS Keccak         | 无项目内依赖              |
 
 依赖方向以领域类型为中心。密码学模块不读取文件，文档模块不处理 HTTP，HTTP schema 不调用 Provider，客户端不导入 Node API。
 
@@ -29,11 +29,12 @@
 1. `domain/vault/model.ts` 定义文档常量、类型和 `VaultError`。
 2. `domain/vault/schemas.ts` 用 Valibot 校验持久化文档(含 v4 `records` 段)。
 3. `domain/vault/records.ts` 校验凭证记录载荷(api-key / grant)，规则与凭证接缝一致且不回显任何值。
-4. `infrastructure/crypto/vault-crypto.ts` 处理 Argon2id、scrypt、AES-GCM、SHA3 和密钥清零。
-5. `infrastructure/persistence/vault-document.ts` 处理规范化序列化、结构校验、文档指纹和记录密文。
-6. `infrastructure/persistence/plain-credential-document.ts` 处理明文 YAML 的版式布局、扁平布局迁移与未知字段报告。
-7. `application/password-service.ts` 处理设密、解锁和密码证明。
-8. `application/remember-service.ts` 处理票据签发、有效期和主密钥恢复。
+4. `infrastructure/crypto/sha3.ts` 提供 SHA3-256：优先 `node:crypto`，Electron(BoringSSL 无 `sha3-256`)回退到 `shared/crypto/keccak.ts` 的纯 JS 实现，两条路径输出一致。
+5. `infrastructure/crypto/vault-crypto.ts` 处理 Argon2id、scrypt、AES-GCM 和密钥清零。
+6. `infrastructure/persistence/vault-document.ts` 处理规范化序列化、结构校验、文档指纹和记录密文。
+7. `infrastructure/persistence/plain-credential-document.ts` 处理明文 YAML 的版式布局、扁平布局迁移与未知字段报告。
+8. `application/password-service.ts` 处理设密、解锁和密码证明。
+9. `application/remember-service.ts` 处理票据签发、有效期和主密钥恢复。
 
 每个模块都可以通过内存输入单独测试。磁盘文档格式、公开函数名和稳定错误码由兼容入口保持。
 

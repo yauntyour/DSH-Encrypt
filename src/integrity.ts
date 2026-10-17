@@ -22,11 +22,11 @@
  * still a byte change and still fails the check.
  * @module dsh-encrypt/integrity
  */
-import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { check, literal, pipe, record, safeParse, strictObject, string } from 'valibot'
+import { sha3_256HexOfBytes } from './infrastructure/crypto/sha3.js'
 import { isAsciiLowerHex, normalizeLineEndings } from './shared/validation/primitives.js'
 
 /** Manifest format marker. */
@@ -78,9 +78,7 @@ export function normalizeForHashing(bytes: Buffer): Buffer {
 
 /** SHA3-256 hex digest of one file's canonicalized bytes. */
 export function sha3File(path: string): string {
-  return createHash('sha3-256')
-    .update(normalizeForHashing(readFileSync(path)))
-    .digest('hex')
+  return sha3_256HexOfBytes(normalizeForHashing(readFileSync(path)))
 }
 
 /**

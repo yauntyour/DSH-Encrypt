@@ -1,5 +1,5 @@
 import type { ParsedEncryptedStore, RememberBlock } from '../domain/vault/model.js'
-import { createHash, randomBytes } from 'node:crypto'
+import { randomBytes } from 'node:crypto'
 import {
   KEY_FILE_VERIFIER_REF,
   MASTER_KEY_BYTES,
@@ -8,6 +8,7 @@ import {
   REMEMBER_KEY_REF,
   VaultError,
 } from '../domain/vault/model.js'
+import { sha3_256Bytes, sha3_256Hex } from '../infrastructure/crypto/sha3.js'
 import {
   decryptEntry,
   encodeMasterKey,
@@ -116,9 +117,7 @@ function parseRememberSecret(secretText: string): Buffer {
 }
 
 function ticketKey(salt: Buffer, secret: Buffer): Buffer {
-  return createHash('sha3-256')
-    .update(Buffer.concat([Buffer.from(REMEMBER_TICKET_DOMAIN, 'utf8'), salt, secret]))
-    .digest()
+  return sha3_256Bytes(Buffer.concat([Buffer.from(REMEMBER_TICKET_DOMAIN, 'utf8'), salt, secret]))
 }
 
 /** Bind every expiry-policy field to the GCM tag through a credential-safe AAD reference. */
@@ -129,7 +128,7 @@ function rememberKeyReference(remember: Pick<RememberBlock, 'version' | 'salt' |
     issuedAt: remember.issuedAt,
     days: remember.days,
   })
-  return `${REMEMBER_KEY_REF}_${createHash('sha3-256').update(metadata, 'utf8').digest('hex')}`
+  return `${REMEMBER_KEY_REF}_${sha3_256Hex(metadata)}`
 }
 
 function throwRememberInvalid(error: unknown): never {
