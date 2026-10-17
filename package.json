@@ -37,13 +37,14 @@
     },
     "./client": {
       "types": "./lib/client.d.ts",
-      "import": "./lib/client.js"
+      "import": "./lib/client.js",
+      "default": "./lib/client.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && tsdown -c tsdown.client.config.ts",
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm knip",
     "dev": "tsdown --watch",
     "format": "oxfmt --write .",

@@ -3,9 +3,9 @@
   "version": 1,
   "files": {
     "cordis.patch.yml": "719895696085061f51dc20ea0bf744dc2963251112598abc48f4d3695cf36881",
-    "lib/client.d.ts": "122a6366755b72a68ee87eace3e899a0dc043f4f335ff3a42de8a5fbe4e3833d",
-    "lib/client.js": "c7a317089f884c3c4cd7b3b51b758c0e5c38c3471c56bd883d422820e7b79b93",
-    "lib/client.js.map": "1d80b0f825cd00c6c49f2230aafd55a531f2140e53f00e0e1394bf637ffddafb",
+    "lib/client.d.ts": "c9276d6ba3ee1da66b22dd45bb3a928d2c08dc44ffaf3503dbf146d4f21588ea",
+    "lib/client.js": "069c501dd500b7765910d3aa885a0f1eec69b8c2edf0b54160fbd5661da8ccf5",
+    "lib/client.js.map": "62dff968bc173c6552187fbe2fcee4ff32b8feb9d555a9938dcf0d4be80040e1",
     "lib/compat.d.ts": "2222bda7291e0ad71145ed32f43535b4178e63a9a61fba76b1955fc9ced32fbc",
     "lib/compat.js": "3ba92b48f972316a325c63d9f49d60d2d2760d0cc60383adcb47243e715b116f",
     "lib/compat.js.map": "3c3f89fe518ee361a63a080326d3cea351953c143de478a754ec586a7db45805",

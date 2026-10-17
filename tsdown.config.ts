@@ -50,7 +50,6 @@ function integrityManifestPlugin(): TsdownPlugin {
 
 export default defineConfig({
   entry: {
-    client: 'src/client.ts',
     compat: 'src/compat.ts',
     index: 'src/index.ts',
     integrity: 'src/integrity.ts',
